@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/primary.swiftdeps"
+  },
+  "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/Sources/MTPProbe/USB/MTPDevice.swift": {
+    "dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/MTPDevice.d",
+    "object": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/MTPDevice.swift.o",
+    "swiftmodule": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/MTPDevice~partial.swiftmodule",
+    "swift-dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/MTPDevice.swiftdeps",
+    "diagnostics": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/MTPDevice.dia"
+  },
+  "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/Sources/MTPProbe/USB/USBDeviceDiscovery.swift": {
+    "dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/USBDeviceDiscovery.d",
+    "object": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/USBDeviceDiscovery.swift.o",
+    "swiftmodule": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/USBDeviceDiscovery~partial.swiftmodule",
+    "swift-dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/USBDeviceDiscovery.swiftdeps",
+    "diagnostics": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/USBDeviceDiscovery.dia"
+  },
+  "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/Sources/MTPProbe/Utils/AndroidDaemonKiller.swift": {
+    "dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/AndroidDaemonKiller.d",
+    "object": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/AndroidDaemonKiller.swift.o",
+    "swiftmodule": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/AndroidDaemonKiller~partial.swiftmodule",
+    "swift-dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/AndroidDaemonKiller.swiftdeps",
+    "diagnostics": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/AndroidDaemonKiller.dia"
+  },
+  "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/Sources/MTPProbe/main.swift": {
+    "dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/main.d",
+    "object": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/main.swift.o",
+    "swiftmodule": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/main.swiftdeps",
+    "diagnostics": "/Users/ashmit/.gemini/antigravity/worktrees/androidtomac/android-usb-finder-research/macos/MTPProbe/.build/arm64-apple-macosx/debug/MTPProbe.build/main.dia"
+  }
+}
