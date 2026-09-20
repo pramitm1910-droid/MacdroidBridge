@@ -11,8 +11,10 @@ public enum MTPOperationCode: UInt16 {
     case closeSession       = 0x1003
     case getStorageIDs      = 0x1004
     case getStorageInfo     = 0x1005
+    case sendObjectInfo     = 0x100C
     case getObjectHandles   = 0x1007
     case getObjectInfo      = 0x1008
+    case sendObject         = 0x100D
 }
 
 // MARK: - MTP Response Codes (RC)

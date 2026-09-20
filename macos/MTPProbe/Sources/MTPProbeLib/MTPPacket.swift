@@ -137,6 +137,27 @@ public struct MTPDataContainer {
     }
 }
 
+public enum MTPDataPacket {
+    public static func serialise(code: UInt16, transactionID: UInt32, payload: Data) -> Data {
+        let totalLength = 12 + payload.count
+        var data = Data(count: totalLength)
+
+        data.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            base.storeBytes(of: UInt32(totalLength).littleEndian, as: UInt32.self)
+            (base + 4).storeBytes(of: MTPContainerType.data.rawValue.littleEndian, as: UInt16.self)
+            (base + 6).storeBytes(of: code.littleEndian, as: UInt16.self)
+            (base + 8).storeBytes(of: transactionID.littleEndian, as: UInt32.self)
+
+            if !payload.isEmpty {
+                payload.copyBytes(to: UnsafeMutableRawBufferPointer(start: base + 12, count: payload.count), count: payload.count)
+            }
+        }
+
+        return data
+    }
+}
+
 // MARK: - MTP Data Reader
 
 /// A cursor-based reader for parsing MTP data payloads.
@@ -224,6 +245,80 @@ public struct MTPDataReader {
             result.append(try readUInt16())
         }
         return result
+    }
+}
+
+// MARK: - MTP Data Writer
+
+public struct MTPDataWriter {
+    private var data = Data()
+
+    public init() {}
+
+    public var bytes: Data { data }
+
+    public mutating func writeUInt8(_ value: UInt8) {
+        data.append(value)
+    }
+
+    public mutating func writeUInt16(_ value: UInt16) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+    }
+
+    public mutating func writeUInt32(_ value: UInt32) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+    }
+
+    public mutating func writeUInt64(_ value: UInt64) {
+        var little = value.littleEndian
+        withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+    }
+
+    public mutating func writeMTPString(_ value: String) {
+        let utf16 = Array(value.utf16)
+        let count = UInt8(utf16.count + 1)
+        writeUInt8(count)
+        for codeUnit in utf16 {
+            writeUInt16(codeUnit)
+        }
+        writeUInt16(0)
+    }
+}
+
+public enum MTPObjectInfoDataset {
+    public static func serialise(
+        storageID: UInt32,
+        parentObject: UInt32,
+        objectFormat: UInt16,
+        filename: String,
+        fileSize: UInt64,
+        protectionStatus: UInt16 = 0,
+        createdDate: String = "2024-01-01T00:00:00",
+        modifiedDate: String = "2024-01-01T00:00:00"
+    ) -> Data {
+        var writer = MTPDataWriter()
+        writer.writeUInt32(storageID)
+        writer.writeUInt16(objectFormat)
+        writer.writeUInt16(protectionStatus)
+        writer.writeUInt32(UInt32(fileSize & 0xFFFFFFFF))
+        writer.writeUInt16(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(parentObject)
+        writer.writeUInt16(0)
+        writer.writeUInt32(0)
+        writer.writeUInt32(0)
+        writer.writeMTPString(filename)
+        writer.writeMTPString(createdDate)
+        writer.writeMTPString(modifiedDate)
+        writer.writeMTPString("")
+        return writer.bytes
     }
 }
 
