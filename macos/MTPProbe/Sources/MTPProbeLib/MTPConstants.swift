@@ -14,6 +14,7 @@ public enum MTPOperationCode: UInt16 {
     case sendObjectInfo     = 0x100C
     case getObjectHandles   = 0x1007
     case getObjectInfo      = 0x1008
+    case getObject          = 0x1009
     case sendObject         = 0x100D
 }
 

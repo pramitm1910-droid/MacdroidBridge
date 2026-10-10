@@ -17,6 +17,47 @@ import Foundation
 
 // MARK: - MTP Command Container
 
+/// Parsed 12-byte MTP container header (little-endian).
+public struct MTPContainerHeader {
+    public let containerLength: UInt32
+    public let containerType: UInt16
+    public let code: UInt16
+    public let transactionID: UInt32
+
+    public static func parse(from data: Data) -> Result<MTPContainerHeader, MTPParseError> {
+        guard data.count >= 12 else {
+            return .failure(.malformed("Container header too short: \(data.count) bytes (minimum 12)"))
+        }
+        return data.withUnsafeBytes { raw -> Result<MTPContainerHeader, MTPParseError> in
+            guard let base = raw.baseAddress else {
+                return .failure(.malformed("Nil base pointer in container header"))
+            }
+            let containerLength = UInt32(littleEndian: base.loadUnaligned(as: UInt32.self))
+            let containerType = UInt16(littleEndian: (base + 4).loadUnaligned(as: UInt16.self))
+            let code = UInt16(littleEndian: (base + 6).loadUnaligned(as: UInt16.self))
+            let transactionID = UInt32(littleEndian: (base + 8).loadUnaligned(as: UInt32.self))
+            return .success(MTPContainerHeader(
+                containerLength: containerLength,
+                containerType: containerType,
+                code: code,
+                transactionID: transactionID
+            ))
+        }
+    }
+
+    public var headerHex: String {
+        var bytes = Data(count: 12)
+        bytes.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            base.storeBytes(of: containerLength.littleEndian, as: UInt32.self)
+            (base + 4).storeBytes(of: containerType.littleEndian, as: UInt16.self)
+            (base + 6).storeBytes(of: code.littleEndian, as: UInt16.self)
+            (base + 8).storeBytes(of: transactionID.littleEndian, as: UInt32.self)
+        }
+        return bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+}
+
 /// A serialisable MTP command container.
 public struct MTPCommandContainer {
     public let code: MTPOperationCode

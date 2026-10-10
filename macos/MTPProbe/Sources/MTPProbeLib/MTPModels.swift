@@ -80,6 +80,10 @@ public struct MTPStorageInfo {
     public let storageDescription: String
     public let volumeIdentifier: String
 
+    public var isWritable: Bool {
+        accessCapability == MTPAccessCapability.readWrite.rawValue
+    }
+
     /// Parse a GetStorageInfo payload.
     public static func parse(storageID: UInt32, from data: Data) throws -> MTPStorageInfo {
         var reader = MTPDataReader(data: data)
@@ -123,6 +127,37 @@ public struct MTPStorageInfo {
         let mb = Double(bytes) / 1_048_576.0
         if mb >= 1.0 { return String(format: "%.1f MB", mb) }
         return "\(bytes) bytes"
+    }
+}
+
+public enum MTPStorageSelector {
+    public static func chooseStorageID(
+        requestedStorageID: UInt32,
+        allStorageIDs: [UInt32],
+        storageInfoByID: [UInt32: MTPStorageInfo]
+    ) -> UInt32 {
+        if requestedStorageID != 0, allStorageIDs.contains(requestedStorageID) {
+            return requestedStorageID
+        }
+
+        let writableCandidates = allStorageIDs.filter { id in
+            guard let info = storageInfoByID[id] else { return false }
+            return info.isWritable
+        }
+
+        if let preferred = writableCandidates.first(where: { $0 == 0x10001 }) {
+            return preferred
+        }
+
+        if let preferred = writableCandidates.first {
+            return preferred
+        }
+
+        if let fallback = allStorageIDs.first(where: { $0 != 0 }) {
+            return fallback
+        }
+
+        return 0
     }
 }
 
