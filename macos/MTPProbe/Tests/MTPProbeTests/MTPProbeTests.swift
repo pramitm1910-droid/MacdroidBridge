@@ -154,4 +154,145 @@ final class MTPProbeTests: XCTestCase {
 
         XCTAssertEqual(selected, 0x10001)
     }
+
+    // MARK: - Transaction ID Sequencing Regression Tests
+
+    /// Verify that successive MTPCommandContainers can carry distinct, sequential transaction IDs
+    /// and that each serialised packet embeds the correct ID. This catches the prior bug where
+    /// every command hardcoded transactionID=1.
+    func testSequentialTransactionIDsSerialiseDistinctly() {
+        let ids: [UInt32] = [1, 2, 3, 4, 5]
+        for id in ids {
+            let command = MTPCommandContainer(code: .getStorageIDs, transactionID: id)
+            let packet = command.serialise()
+            let embeddedID = packet.dropFirst(8).prefix(4).withUnsafeBytes {
+                UInt32(littleEndian: $0.load(as: UInt32.self))
+            }
+            XCTAssertEqual(embeddedID, id, "Transaction ID in serialised command should be \(id)")
+        }
+    }
+
+    /// Exercise the allocator type held and used by MTPDevice, rather than supplying
+    /// hand-picked IDs directly to packet serialization.
+    func testMTPDeviceTransactionAllocatorStartsAtOneAndIncrements() {
+        var allocator = MTPTransactionIDAllocator()
+
+        XCTAssertEqual(allocator.allocate(), 1)
+        XCTAssertEqual(allocator.allocate(), 2)
+        XCTAssertEqual(allocator.allocate(), 3)
+    }
+
+    func testMTPDeviceTransactionAllocatorWrapsWithoutAllocatingZero() {
+        var allocator = MTPTransactionIDAllocator(startingAt: UInt32.max)
+
+        XCTAssertEqual(allocator.allocate(), UInt32.max)
+        XCTAssertEqual(allocator.allocate(), 1)
+    }
+
+    func testOpenSessionUsesTransactionIDZeroBeforeAllocatorStartsAtOne() {
+        let command = MTPCommandContainer(
+            code: .openSession,
+            transactionID: MTPTransactionIDAllocator.openSessionTransactionID,
+            parameters: [1]
+        )
+        let packet = command.serialise()
+        let transactionID = UInt32(littleEndian: packet.dropFirst(8).prefix(4).withUnsafeBytes {
+            $0.load(as: UInt32.self)
+        })
+        var allocator = MTPTransactionIDAllocator()
+
+        XCTAssertEqual(transactionID, 0)
+        XCTAssertEqual(allocator.allocate(), 1)
+    }
+
+    /// Verify that the command, data, and response phases of a transfer all embed the same
+    /// transaction ID.  Prior code used separate hardcoded values.
+    func testCommandAndDataContainerShareTransactionID() {
+        let txID: UInt32 = 7
+        let command = MTPCommandContainer(code: .sendObjectInfo, transactionID: txID, parameters: [0x10001, 0xFFFFFFFF])
+        let commandPacket = command.serialise()
+        let dataPacket = MTPDataPacket.serialise(
+            code: MTPOperationCode.sendObjectInfo.rawValue,
+            transactionID: txID,
+            payload: Data([0x01, 0x02])
+        )
+
+        let cmdTxID = commandPacket.dropFirst(8).prefix(4).withUnsafeBytes {
+            UInt32(littleEndian: $0.load(as: UInt32.self))
+        }
+        let dataTxID = dataPacket.dropFirst(8).prefix(4).withUnsafeBytes {
+            UInt32(littleEndian: $0.load(as: UInt32.self))
+        }
+        XCTAssertEqual(cmdTxID, txID)
+        XCTAssertEqual(dataTxID, txID)
+        XCTAssertEqual(cmdTxID, dataTxID, "Command and data phase must carry the same transaction ID")
+    }
+
+    // MARK: - SessionAlreadyOpen Response Parsing
+
+    /// Parse a synthetic 0x201E SessionAlreadyOpen response and verify the existing session ID
+    /// is extracted from parameter[0].  This tests the response format that the fixed
+    /// openSession() now relies on.
+    func testSessionAlreadyOpenResponseCarriesExistingSessionID() {
+        // Build a 16-byte response container:
+        //   Length=16, Type=0x0003 (response), Code=0x201E, TxID=0, Param[0]=existingSessionID
+        let existingSessionID: UInt32 = 1
+        var responseBytes = Data(count: 16)
+        responseBytes.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            base.storeBytes(of: UInt32(16).littleEndian, as: UInt32.self)
+            (base + 4).storeBytes(of: MTPContainerType.response.rawValue.littleEndian, as: UInt16.self)
+            (base + 6).storeBytes(of: MTPResponseCode.sessionAlreadyOpen.rawValue.littleEndian, as: UInt16.self)
+            (base + 8).storeBytes(of: UInt32(0).littleEndian, as: UInt32.self)     // txID
+            (base + 12).storeBytes(of: existingSessionID.littleEndian, as: UInt32.self)
+        }
+
+        switch MTPResponseContainer.parse(from: responseBytes) {
+        case .failure(let err):
+            XCTFail("Response parse failed: \(err)")
+        case .success(let response):
+            XCTAssertEqual(response.responseCode, MTPResponseCode.sessionAlreadyOpen.rawValue)
+            XCTAssertEqual(response.parameters.count, 1, "SessionAlreadyOpen must carry 1 parameter")
+            XCTAssertEqual(response.parameters.first, existingSessionID,
+                           "Parameter[0] should be the existing session ID")
+            XCTAssertEqual(response.transactionID, MTPTransactionIDAllocator.openSessionTransactionID)
+        }
+    }
+
+    /// Verify that a bare OK response (no parameters, 12 bytes) is correctly parsed —
+    /// this is what a successful OpenSession returns.
+    func testOpenSessionOKResponseParsesCleanly() {
+        var responseBytes = Data(count: 12)
+        responseBytes.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            base.storeBytes(of: UInt32(12).littleEndian, as: UInt32.self)
+            (base + 4).storeBytes(of: MTPContainerType.response.rawValue.littleEndian, as: UInt16.self)
+            (base + 6).storeBytes(of: MTPResponseCode.ok.rawValue.littleEndian, as: UInt16.self)
+            (base + 8).storeBytes(of: MTPTransactionIDAllocator.openSessionTransactionID.littleEndian, as: UInt32.self)
+        }
+
+        switch MTPResponseContainer.parse(from: responseBytes) {
+        case .failure(let err):
+            XCTFail("Response parse failed: \(err)")
+        case .success(let response):
+            XCTAssertTrue(response.isOK)
+            XCTAssertTrue(response.parameters.isEmpty, "OK response for OpenSession has no parameters")
+            XCTAssertEqual(response.transactionID, MTPTransactionIDAllocator.openSessionTransactionID)
+        }
+    }
+
+    func testMTPResponseRejectsPartialParameterForSessionAlreadyOpen() {
+        var responseBytes = Data(count: 13)
+        responseBytes.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            base.storeBytes(of: UInt32(13).littleEndian, as: UInt32.self)
+            (base + 4).storeBytes(of: MTPContainerType.response.rawValue.littleEndian, as: UInt16.self)
+            (base + 6).storeBytes(of: MTPResponseCode.sessionAlreadyOpen.rawValue.littleEndian, as: UInt16.self)
+            (base + 8).storeBytes(of: MTPTransactionIDAllocator.openSessionTransactionID.littleEndian, as: UInt32.self)
+        }
+
+        if case .success = MTPResponseContainer.parse(from: responseBytes) {
+            XCTFail("A response with a partial parameter must be rejected")
+        }
+    }
 }

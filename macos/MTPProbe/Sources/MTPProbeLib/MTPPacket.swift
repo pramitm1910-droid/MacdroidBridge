@@ -127,6 +127,9 @@ public struct MTPResponseContainer {
             guard containerLength <= data.count else {
                 return .failure(.malformed("ContainerLength (\(containerLength)) exceeds data size (\(data.count))"))
             }
+            guard containerLength >= 12, (containerLength - 12).isMultiple(of: 4) else {
+                return .failure(.malformed("Response length must contain a 12-byte header and whole 4-byte parameters"))
+            }
 
             let paramByteCount = Int(containerLength) - 12
             let paramCount = paramByteCount / 4

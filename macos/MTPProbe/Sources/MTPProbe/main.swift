@@ -284,8 +284,7 @@ func runUploadTest(fileURL: URL, storageID: UInt32, format: UInt16, name: String
             storageID: chosenStorageID,
             parentHandle: 0xFFFFFFFF,
             filename: name ?? fileURL.lastPathComponent,
-            format: format,
-            transactionID: 1
+            format: format
         )
 
         print("\nUpload success: \(result.filename)")
