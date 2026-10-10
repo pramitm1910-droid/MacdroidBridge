@@ -111,10 +111,65 @@ public class MTPDevice {
     }
     
     public func getStorageIDs() throws -> [UInt32] {
+        let transactionID: UInt32 = 1
+        print("GetStorageIDs diagnostics")
+        print("Command opcode: 0x\(String(MTPOperationCode.getStorageIDs.rawValue, radix: 16, uppercase: true))")
+        print("Command transaction ID: \(transactionID)")
+
         try sendCommand(.getStorageIDs)
-        let data = try readData()
-        var reader = MTPDataReader(data: data.payload)
-        return try reader.readUInt32Array()
+
+        let first = try readBulkInTransfer()
+        print("GetStorageIDs bulk-IN #1 bytes received: \(first.count)")
+        print("GetStorageIDs bulk-IN #1 hex: \(hexDump(first))")
+        logContainerHeader(label: "GetStorageIDs bulk-IN #1", data: first)
+
+        switch MTPDataContainer.parse(from: first) {
+        case .failure(let err):
+            print("GetStorageIDs data-container parse: FAIL (\(err.description))")
+            if case .success(let response) = MTPResponseContainer.parse(from: first) {
+                print("GetStorageIDs response code: 0x\(String(response.responseCode, radix: 16, uppercase: true))")
+                print("GetStorageIDs response transaction ID: \(response.transactionID)")
+                print("GetStorageIDs parsed storage IDs: (none; device sent a response instead of a data container)")
+            }
+            throw MTPDeviceError.receiveDataFailed(err.description)
+
+        case .success(let dataContainer):
+            print("GetStorageIDs data-container parse: OK")
+            print("GetStorageIDs data opcode: 0x\(String(dataContainer.operationCode, radix: 16, uppercase: true))")
+            print("GetStorageIDs data transaction ID: \(dataContainer.transactionID)")
+            print("GetStorageIDs payload bytes: \(dataContainer.payload.count)")
+            print("GetStorageIDs payload hex: \(hexDump(dataContainer.payload))")
+
+            let second = try readBulkInTransfer()
+            print("GetStorageIDs bulk-IN #2 bytes received: \(second.count)")
+            print("GetStorageIDs bulk-IN #2 hex: \(hexDump(second))")
+            logContainerHeader(label: "GetStorageIDs bulk-IN #2", data: second)
+
+            switch MTPResponseContainer.parse(from: second) {
+            case .success(let response):
+                print("GetStorageIDs response code: 0x\(String(response.responseCode, radix: 16, uppercase: true))")
+                print("GetStorageIDs response transaction ID: \(response.transactionID)")
+                if !response.isOK {
+                    throw MTPDeviceError.mtpTransferFailed(
+                        operationCode: MTPOperationCode.getStorageIDs.rawValue,
+                        containerType: MTPContainerType.response.rawValue,
+                        transactionID: response.transactionID,
+                        responseCode: response.responseCode,
+                        declaredLength: UInt32(second.count),
+                        actualBytes: second.count,
+                        headerHex: headerHex(from: second)
+                    )
+                }
+            case .failure(let err):
+                print("GetStorageIDs response parse: FAIL (\(err.description))")
+                throw MTPDeviceError.receiveDataFailed(err.description)
+            }
+
+            var reader = MTPDataReader(data: dataContainer.payload)
+            let ids = try reader.readUInt32Array()
+            print("GetStorageIDs parsed storage IDs: \(ids.isEmpty ? "(empty)" : ids.map { "0x\(String($0, radix: 16, uppercase: true))" }.joined(separator: ", "))")
+            return ids
+        }
     }
     
     public func getStorageInfo(storageID: UInt32) throws -> MTPStorageInfo {
@@ -315,6 +370,28 @@ public class MTPDevice {
 
     private func headerHex(from data: Data) -> String {
         data.prefix(12).map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    private func hexDump(_ data: Data, limit: Int = 256) -> String {
+        if data.isEmpty { return "(empty)" }
+        let prefix = data.prefix(limit)
+        let hex = prefix.map { String(format: "%02X", $0) }.joined(separator: " ")
+        if data.count > limit {
+            return hex + " ... (\(data.count - limit) more bytes)"
+        }
+        return hex
+    }
+
+    private func logContainerHeader(label: String, data: Data) {
+        switch MTPContainerHeader.parse(from: data) {
+        case .failure(let err):
+            print("\(label) header parse: FAIL (\(err.description))")
+        case .success(let header):
+            print("\(label) declared length: \(header.containerLength)")
+            print("\(label) container type: 0x\(String(header.containerType, radix: 16, uppercase: true))")
+            print("\(label) code: 0x\(String(header.code, radix: 16, uppercase: true))")
+            print("\(label) transaction ID: \(header.transactionID)")
+        }
     }
 
     private func readAssembledDataContainer(operationCode: UInt16, transactionID: UInt32) throws -> AssembledDataContainer {
