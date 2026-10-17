@@ -46,6 +46,9 @@ public class MTPDevice {
     private let interface: IOUSBHostInterface
     private let bulkInPipe: IOUSBHostPipe
     private let bulkOutPipe: IOUSBHostPipe
+    private let bulkOutMaxPacketSize: Int
+    private var transactionInFlight = false
+    private let receiveDecoder = MTPReceiveDecoder(maximumReadSize: MTPBulkMaxPacketSize)
 
     /// Allocates sequential IDs for regular operations in the current session.
     private var transactionIDs = MTPTransactionIDAllocator()
@@ -54,8 +57,34 @@ public class MTPDevice {
     private(set) public var sessionID: UInt32?
 
     public init(service: io_service_t) throws {
-        // Attempt to instantiate the interface from the io_service_t
-        guard let intf = try? IOUSBHostInterface(__ioService: service, options: [], queue: nil, interestHandler: nil) else {
+        // Log only allowlisted interface properties; do not dump the complete
+        // registry dictionary because it may contain device identifiers.
+        var properties: Unmanaged<CFMutableDictionary>?
+        let propertiesResult = IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0)
+        if propertiesResult == kIOReturnSuccess,
+           let registryProperties = properties?.takeRetainedValue() as? [String: Any] {
+            let safeKeys = [
+                "idVendor", "idProduct", "bInterfaceNumber", "bInterfaceClass",
+                "bInterfaceSubClass", "bInterfaceProtocol", "USB Interface Number",
+                "USB Interface Class", "USB Interface Subclass", "USB Interface Protocol"
+            ]
+            let summary = safeKeys.compactMap { key in
+                registryProperties[key].map { "\(key)=\($0)" }
+            }.joined(separator: ", ")
+            print("MTP interface service properties: \(summary.isEmpty ? "(no allowlisted properties found)" : summary)")
+        } else {
+            print("MTP interface service properties unavailable (IORegistry result: \(propertiesResult))")
+        }
+
+        // USBDeviceDiscovery matches IOUSBHostInterface objects by MTP class,
+        // subclass, and protocol, and the probe passes that service here.
+        let intf: IOUSBHostInterface
+        do {
+            intf = try IOUSBHostInterface(__ioService: service, options: [], queue: nil, interestHandler: nil)
+        } catch {
+            let nsError = error as NSError
+            print("IOUSBHostInterface initialization error: \(String(describing: error))")
+            print("IOUSBHostInterface NSError domain: \(nsError.domain), code: \(nsError.code), description: \(nsError.localizedDescription)")
             throw MTPDeviceError.failedToCreateInterface
         }
         
@@ -67,6 +96,7 @@ public class MTPDevice {
         
         var foundIn: IOUSBHostPipe?
         var foundOut: IOUSBHostPipe?
+        var outPacketSize = 0
         
         while let desc = epDesc {
             let addr = IOUSBGetEndpointAddress(desc)
@@ -82,6 +112,7 @@ public class MTPDevice {
                     foundIn = try? intf.copyPipe(withAddress: Int(addr))
                 } else if dir == 0, foundOut == nil {
                     foundOut = try? intf.copyPipe(withAddress: Int(addr))
+                    outPacketSize = Int(UInt16(littleEndian: desc.pointee.wMaxPacketSize) & 0x07ff)
                 }
             }
             
@@ -89,17 +120,22 @@ public class MTPDevice {
             epDesc = IOUSBGetNextEndpointDescriptor(confDesc, intfDesc, UnsafeRawPointer(desc).assumingMemoryBound(to: IOUSBDescriptorHeader.self))
         }
         
-        guard let bulkIn = foundIn, let bulkOut = foundOut else {
+        guard let bulkIn = foundIn, let bulkOut = foundOut, outPacketSize > 0 else {
             throw MTPDeviceError.pipesNotFound
         }
         
         self.bulkInPipe = bulkIn
         self.bulkOutPipe = bulkOut
+        self.bulkOutMaxPacketSize = outPacketSize
+        print("Bulk OUT endpoint packet size: \(outPacketSize)")
         
         print("Successfully created IOUSBHostInterface and located bulk pipes.")
     }
     
     public func openSession() throws {
+        guard sessionID == nil else {
+            throw MTPDeviceError.sendCommandFailed("This connection already owns an MTP session")
+        }
         // MTP spec §10.5.2: Session ID must be non-zero.
         let sessionID: UInt32 = 1
         let command = MTPCommandContainer(
@@ -107,17 +143,18 @@ public class MTPDevice {
             transactionID: MTPTransactionIDAllocator.openSessionTransactionID,
             parameters: [sessionID]
         )
+        print("OpenSession command hex: \(hexDump(command.serialise()))")
         try writeUSBData(command.serialise())
-        let response = try readResponse()
+        let response = try readResponse(logLabel: "OpenSession")
         try validate(response: response, transactionID: MTPTransactionIDAllocator.openSessionTransactionID)
         if response.isOK {
+            transactionIDs = MTPTransactionIDAllocator()
             self.sessionID = sessionID
             print("MTP Session Opened Successfully!")
             return
         }
         if response.responseCode == MTPResponseCode.sessionAlreadyOpen.rawValue {
-            // MTP spec: SessionAlreadyOpen response parameter[0] is the
-            // already-open session ID.  Re-use it instead of failing.
+            // A session ID does not tell us the previous owner's next transaction ID.
             guard response.parameters.count == 1,
                   let existingSessionID = response.parameters.first,
                   existingSessionID != 0 else {
@@ -125,15 +162,25 @@ public class MTPDevice {
                     "SessionAlreadyOpen response must contain one non-zero session ID parameter"
                 )
             }
-            self.sessionID = existingSessionID
-            // OpenSession uses transaction ID 0, so the first regular
-            // operation remains transaction ID 1 for either response path.
-            print("MTP Session already open (session ID: \(existingSessionID)). Reusing.")
-            return
+            throw MTPDeviceError.sendCommandFailed(
+                "SessionAlreadyOpen (session ID: \(existingSessionID)). Reconnect the phone to establish a fresh session; refusing to reuse unknown transaction state."
+            )
         }
         throw MTPDeviceError.sendCommandFailed("Failed to open session. Code: 0x\(String(response.responseCode, radix: 16))")
     }
     
+    public func closeSession() throws {
+        guard sessionID != nil else { return }
+        let transactionID = try sendCommand(.closeSession)
+        let response = try readResponse(logLabel: "CloseSession")
+        try validate(response: response, transactionID: transactionID)
+        guard response.isOK else {
+            throw MTPDeviceError.sendCommandFailed("CloseSession failed: 0x\(String(response.responseCode, radix: 16))")
+        }
+        sessionID = nil
+        print("MTP Session Closed Successfully!")
+    }
+
     public func getDeviceInfo() throws -> MTPDeviceInfo {
         let transactionID = try sendCommand(.getDeviceInfo)
         let data = try readData(operationCode: MTPOperationCode.getDeviceInfo.rawValue, transactionID: transactionID)
@@ -141,74 +188,28 @@ public class MTPDevice {
     }
     
     public func getStorageIDs() throws -> [UInt32] {
-        print("GetStorageIDs diagnostics")
-        print("Command opcode: 0x\(String(MTPOperationCode.getStorageIDs.rawValue, radix: 16, uppercase: true))")
         let transactionID = try sendCommand(.getStorageIDs)
-        print("Command transaction ID: \(transactionID)")
-
-        let first = try readBulkInTransfer()
-        print("GetStorageIDs bulk-IN #1 bytes received: \(first.count)")
-        print("GetStorageIDs bulk-IN #1 hex: \(hexDump(first))")
-        logContainerHeader(label: "GetStorageIDs bulk-IN #1", data: first)
-
-        switch MTPDataContainer.parse(from: first) {
-        case .failure(let err):
-            print("GetStorageIDs data-container parse: FAIL (\(err.description))")
-            if case .success(let response) = MTPResponseContainer.parse(from: first) {
-                print("GetStorageIDs response code: 0x\(String(response.responseCode, radix: 16, uppercase: true))")
-                print("GetStorageIDs response transaction ID: \(response.transactionID)")
-                try validate(response: response, transactionID: transactionID)
-                print("GetStorageIDs parsed storage IDs: (none; device sent a response instead of a data container)")
-            }
-            throw MTPDeviceError.receiveDataFailed(err.description)
-
-        case .success(let dataContainer):
-            print("GetStorageIDs data-container parse: OK")
-            print("GetStorageIDs data opcode: 0x\(String(dataContainer.operationCode, radix: 16, uppercase: true))")
-            print("GetStorageIDs data transaction ID: \(dataContainer.transactionID)")
-            try validate(dataContainer: dataContainer, operationCode: MTPOperationCode.getStorageIDs.rawValue, transactionID: transactionID)
-            print("GetStorageIDs payload bytes: \(dataContainer.payload.count)")
-            print("GetStorageIDs payload hex: \(hexDump(dataContainer.payload))")
-
-            let second = try readBulkInTransfer()
-            print("GetStorageIDs bulk-IN #2 bytes received: \(second.count)")
-            print("GetStorageIDs bulk-IN #2 hex: \(hexDump(second))")
-            logContainerHeader(label: "GetStorageIDs bulk-IN #2", data: second)
-
-            switch MTPResponseContainer.parse(from: second) {
-            case .success(let response):
-                print("GetStorageIDs response code: 0x\(String(response.responseCode, radix: 16, uppercase: true))")
-                print("GetStorageIDs response transaction ID: \(response.transactionID)")
-                try validate(response: response, transactionID: transactionID)
-                if !response.isOK {
-                    throw MTPDeviceError.mtpTransferFailed(
-                        operationCode: MTPOperationCode.getStorageIDs.rawValue,
-                        containerType: MTPContainerType.response.rawValue,
-                        transactionID: response.transactionID,
-                        responseCode: response.responseCode,
-                        declaredLength: UInt32(second.count),
-                        actualBytes: second.count,
-                        headerHex: headerHex(from: second)
-                    )
-                }
-            case .failure(let err):
-                print("GetStorageIDs response parse: FAIL (\(err.description))")
-                throw MTPDeviceError.receiveDataFailed(err.description)
-            }
-
-            var reader = MTPDataReader(data: dataContainer.payload)
-            let ids = try reader.readUInt32Array()
-            print("GetStorageIDs parsed storage IDs: \(ids.isEmpty ? "(empty)" : ids.map { "0x\(String($0, radix: 16, uppercase: true))" }.joined(separator: ", "))")
-            return ids
-        }
+        let data = try readData(operationCode: MTPOperationCode.getStorageIDs.rawValue, transactionID: transactionID)
+        var reader = MTPDataReader(data: data.payload)
+        let ids = try reader.readUInt32Array()
+        print("GetStorageIDs parsed storage IDs: \(ids.isEmpty ? "(empty)" : ids.map { "0x\(String($0, radix: 16, uppercase: true))" }.joined(separator: ", "))")
+        return ids
     }
-    
+
     public func getStorageInfo(storageID: UInt32) throws -> MTPStorageInfo {
         let transactionID = try sendCommand(.getStorageInfo, parameters: [storageID])
         let data = try readData(operationCode: MTPOperationCode.getStorageInfo.rawValue, transactionID: transactionID)
         return try MTPStorageInfo.parse(storageID: storageID, from: data.payload)
     }
     
+    /// Explicit investigation only: accepts a caller-supplied historical ID and records response-only errors.
+    public func diagnoseStorageInfo(storageID: UInt32) throws -> MTPStorageInfo {
+        let transactionID = try sendCommand(.getStorageInfo, parameters: [storageID])
+        print("GetStorageInfo diagnostic storage ID: 0x\(String(storageID, radix: 16)); transaction ID: \(transactionID)")
+        let data = try readData(operationCode: MTPOperationCode.getStorageInfo.rawValue, transactionID: transactionID)
+        return try MTPStorageInfo.parse(storageID: storageID, from: data.payload)
+    }
+
     public func getObjectHandles(storageID: UInt32, format: UInt16 = 0, parent: UInt32 = 0xFFFFFFFF) throws -> [UInt32] {
         let transactionID = try sendCommand(.getObjectHandles, parameters: [storageID, UInt32(format), parent])
         let data = try readData(operationCode: MTPOperationCode.getObjectHandles.rawValue, transactionID: transactionID)
@@ -222,38 +223,15 @@ public class MTPDevice {
         return try MTPObjectInfo.parse(objectHandle: objectHandle, from: data.payload)
     }
 
-    /// Issue GetObject (0x1009), assemble the 0x0002 data container across bulk-IN transfers, then require 0x2001 OK.
+    /// Stream the GetObject data phase into temporary storage, then require OK.
+    /// The existing Data API returns a read-only file mapping, not a heap copy.
     public func getObject(handle: UInt32) throws -> Data {
-        let txID = transactionIDs.allocate()
+        let txID = try allocateTransaction()
         let command = MTPCommandContainer(code: .getObject, transactionID: txID, parameters: [handle])
         try writeUSBData(command.serialise())
-
-        let assembled = try readAssembledDataContainer(
-            operationCode: MTPOperationCode.getObject.rawValue,
-            transactionID: txID
-        )
-        let response = try readResponseCapturingDiagnostics(
-            operationCode: MTPOperationCode.getObject.rawValue,
-            transactionID: txID,
-            declaredLength: assembled.declaredLength,
-            actualBytes: assembled.raw.count,
-            headerHex: assembled.headerHex
-        )
-        try validate(response: response, transactionID: txID)
-        if !response.isOK {
-            throw MTPDeviceError.mtpTransferFailed(
-                operationCode: MTPOperationCode.getObject.rawValue,
-                containerType: MTPContainerType.response.rawValue,
-                transactionID: response.transactionID,
-                responseCode: response.responseCode,
-                declaredLength: assembled.declaredLength,
-                actualBytes: assembled.raw.count,
-                headerHex: assembled.headerHex
-            )
-        }
-        print("GetObject response: 0x\(String(response.responseCode, radix: 16, uppercase: true))")
-        return assembled.payload
+        return try readData(operationCode: MTPOperationCode.getObject.rawValue, transactionID: txID).payload
     }
+
 
     /// Send a file's metadata to Android, receive the assigned object handle, then upload raw bytes and verify the resulting metadata.
     public func uploadFile(
@@ -282,7 +260,10 @@ public class MTPDevice {
 
         let objectInfo = try getObjectInfo(objectHandle: objectHandle)
         print("GetObjectInfo: OK")
-        print("Upload verified successfully")
+        guard UInt64(objectInfo.objectCompressedSize) == UInt64(fileData.count) else {
+            throw MTPDeviceError.receiveDataFailed("Uploaded object size mismatch: expected \(fileData.count), got \(objectInfo.objectCompressedSize)")
+        }
+        print("Upload metadata size verified; content verification requires download and SHA-256 comparison")
         return objectInfo
     }
 
@@ -295,7 +276,7 @@ public class MTPDevice {
         format: UInt16 = 0x3000,
         protectionStatus: UInt16 = 0
     ) throws -> UInt32 {
-        let txID = transactionIDs.allocate()
+        let txID = try allocateTransaction()
         let dataSet = MTPObjectInfoDataset.serialise(
             storageID: storageID,
             parentObject: parentHandle,
@@ -308,7 +289,7 @@ public class MTPDevice {
         let command = MTPCommandContainer(
             code: .sendObjectInfo,
             transactionID: txID,
-            parameters: [storageID, parentHandle, UInt32(format), UInt32(protectionStatus), UInt32(fileSize & 0xFFFFFFFF)]
+            parameters: [storageID, parentHandle]
         )
 
         try writeUSBData(command.serialise())
@@ -325,8 +306,8 @@ public class MTPDevice {
         //   [1] ParentObjectHandle
         //   [2] ObjectHandle
         // Parameter count is derived from ContainerLength in MTPResponseContainer.parse.
-        guard response.parameters.count >= 3 else {
-            return 0
+        guard response.parameters.count == 3, response.parameters[2] != 0 else {
+            throw MTPDeviceError.receiveDataFailed("SendObjectInfo returned no valid object handle")
         }
         return response.parameters[2]
     }
@@ -338,23 +319,39 @@ public class MTPDevice {
     /// 2. SendObject streams the raw file bytes.
     /// 3. The device replies with a final response container indicating success/failure.
     public func sendObject(fileData: Data, objectHandle: UInt32 = 0) throws -> UInt32 {
-        let txID = transactionIDs.allocate()
-        let command = MTPCommandContainer(code: .sendObject, transactionID: txID, parameters: [objectHandle])
-        try writeUSBData(command.serialise())
-
-        let chunkSize = MTPBulkMaxPacketSize
-        var offset = 0
-        while offset < fileData.count {
-            let end = min(offset + chunkSize, fileData.count)
-            let dataChunk = fileData.subdata(in: offset..<end)
-            let packet = MTPDataPacket.serialise(code: MTPOperationCode.sendObject.rawValue,
-                                               transactionID: txID,
-                                               payload: dataChunk)
-            try writeUSBData(packet)
-            offset = end
+        let txID = try allocateTransaction()
+        let command = MTPCommandContainer(code: .sendObject, transactionID: txID)
+        do {
+            try writeUSBData(command.serialise())
+            print("SendObject command transfer: OK (12 bytes), transaction ID: \(txID)")
+        } catch {
+            print("SendObject command transfer failed: \(error)")
+            throw error
         }
 
-        let response = try readResponse()
+        var offset = 0
+        try MTPDataPacket.write(code: MTPOperationCode.sendObject.rawValue,
+                                transactionID: txID, payload: fileData,
+                                maxTransferSize: MTPBulkMaxPacketSize,
+                                endpointPacketSize: bulkOutMaxPacketSize) { packet in
+            do {
+                try writeUSBData(packet)
+                if packet.isEmpty { print("SendObject USB zero-length terminator sent") }
+            } catch {
+                print("SendObject data transfer failed at container offset \(offset), write \(packet.count) bytes: \(error)")
+                throw error
+            }
+            offset += packet.count
+        }
+        print("SendObject data container: \(offset) bytes; payload: \(fileData.count) bytes; transaction ID: \(txID)")
+
+        let response: MTPResponseContainer
+        do {
+            response = try readResponse()
+        } catch {
+            print("SendObject response read failed after \(offset) container bytes: \(error)")
+            throw error
+        }
         try validate(response: response, transactionID: txID)
         if !response.isOK {
             throw MTPDeviceError.sendCommandFailed("SendObject failed. Code: 0x\(String(response.responseCode, radix: 16))")
@@ -365,10 +362,19 @@ public class MTPDevice {
     
     // MARK: - Private Helpers
     
+    private func allocateTransaction() throws -> UInt32 {
+        guard !transactionInFlight else {
+            throw MTPDeviceError.sendCommandFailed("Previous MTP transaction is incomplete; reconnect the phone before issuing another command")
+        }
+        transactionInFlight = true
+        return transactionIDs.allocate()
+    }
+
     @discardableResult
     private func sendCommand(_ code: MTPOperationCode, parameters: [UInt32] = []) throws -> UInt32 {
-        let txID = transactionIDs.allocate()
+        let txID = try allocateTransaction()
         let container = MTPCommandContainer(code: code, transactionID: txID, parameters: parameters)
+        print("MTP command opcode: 0x\(String(code.rawValue, radix: 16)), transaction ID: \(txID)")
         let data = container.serialise()
         try writeUSBData(data)
         return txID
@@ -393,14 +399,19 @@ public class MTPDevice {
                 "Response transaction ID mismatch: expected \(transactionID), got \(response.transactionID)"
             )
         }
+    transactionInFlight = false
     }
 
     private func writeUSBData(_ data: Data) throws {
-        let mutableData = NSMutableData(data: data)
+        // IOUSBHost sends a zero-length USB packet when the buffer is nil.
+        let mutableData: NSMutableData? = data.isEmpty ? nil : NSMutableData(data: data)
         var transferred: Int = 0
 
         do {
             try bulkOutPipe.__sendIORequest(with: mutableData, bytesTransferred: &transferred, completionTimeout: 5.0)
+            guard transferred == data.count else {
+                throw MTPDeviceError.sendCommandFailed("Short USB write: expected \(data.count) bytes, transferred \(transferred)")
+            }
         } catch {
             throw MTPDeviceError.sendCommandFailed(error.localizedDescription)
         }
@@ -419,17 +430,6 @@ public class MTPDevice {
         return Data(bytes: receiveBuffer.bytes, count: receivedBytes)
     }
 
-    private struct AssembledDataContainer {
-        let payload: Data
-        let declaredLength: UInt32
-        let raw: Data
-        let headerHex: String
-    }
-
-    private func headerHex(from data: Data) -> String {
-        data.prefix(12).map { String(format: "%02X", $0) }.joined(separator: " ")
-    }
-
     private func hexDump(_ data: Data, limit: Int = 256) -> String {
         if data.isEmpty { return "(empty)" }
         let prefix = data.prefix(limit)
@@ -440,215 +440,57 @@ public class MTPDevice {
         return hex
     }
 
-    private func logContainerHeader(label: String, data: Data) {
-        switch MTPContainerHeader.parse(from: data) {
-        case .failure(let err):
-            print("\(label) header parse: FAIL (\(err.description))")
-        case .success(let header):
-            print("\(label) declared length: \(header.containerLength)")
-            print("\(label) container type: 0x\(String(header.containerType, radix: 16, uppercase: true))")
-            print("\(label) code: 0x\(String(header.code, radix: 16, uppercase: true))")
-            print("\(label) transaction ID: \(header.transactionID)")
-        }
-    }
-
-    private func readAssembledDataContainer(operationCode: UInt16, transactionID: UInt32) throws -> AssembledDataContainer {
-        var assembled = Data()
-        var declaredLength: UInt32?
-
-        while true {
-            let chunk: Data
-            do {
-                chunk = try readBulkInTransfer()
-            } catch {
-                throw MTPDeviceError.mtpTransferFailed(
-                    operationCode: operationCode,
-                    containerType: assembled.count >= 6 ? UInt16(littleEndian: assembled.subdata(in: 4..<6).withUnsafeBytes { $0.load(as: UInt16.self) }) : 0,
-                    transactionID: transactionID,
-                    responseCode: 0,
-                    declaredLength: declaredLength ?? 0,
-                    actualBytes: assembled.count,
-                    headerHex: headerHex(from: assembled)
-                )
+    /// All consumers share one decoder, including metadata and response reads.
+    /// No command/session boundary clears unread bytes. A framing/I/O failure
+    /// poisons this decoder; recovery requires a new MTPDevice/USB connection.
+    private func receiveContainer(operationCode: UInt16? = nil,
+                                  transactionID: UInt32? = nil,
+                                  responseOnly: Bool = false) throws -> MTPReceivedContainer {
+        try receiveDecoder.receiveStored(read: { try self.readBulkInTransfer() }, onHeader: { header in
+            if let transactionID, header.transactionID != transactionID {
+                throw MTPDeviceError.receiveDataFailed("Container transaction ID mismatch: expected \(transactionID), got \(header.transactionID)")
             }
-
-            if chunk.isEmpty {
-                throw MTPDeviceError.mtpTransferFailed(
-                    operationCode: operationCode,
-                    containerType: assembled.count >= 6 ? UInt16(littleEndian: assembled.subdata(in: 4..<6).withUnsafeBytes { $0.load(as: UInt16.self) }) : 0,
-                    transactionID: transactionID,
-                    responseCode: 0,
-                    declaredLength: declaredLength ?? 0,
-                    actualBytes: assembled.count,
-                    headerHex: headerHex(from: assembled)
-                )
+            if responseOnly && header.containerType != MTPContainerType.response.rawValue {
+                throw MTPParseError.invalidContainerType(header.containerType)
             }
-
-            assembled.append(chunk)
-
-            guard assembled.count >= 12 else { continue }
-
-            switch MTPContainerHeader.parse(from: assembled) {
-            case .failure(let err):
-                throw MTPDeviceError.mtpTransferFailed(
-                    operationCode: operationCode,
-                    containerType: 0,
-                    transactionID: transactionID,
-                    responseCode: 0,
-                    declaredLength: 0,
-                    actualBytes: assembled.count,
-                    headerHex: headerHex(from: assembled) + " (\(err.description))"
-                )
-            case .success(let header):
-                declaredLength = header.containerLength
-
-                if header.containerType == MTPContainerType.response.rawValue {
-                    let responseCode: UInt16
-                    switch MTPResponseContainer.parse(from: assembled) {
-                    case .success(let response):
-                        responseCode = response.responseCode
-                    case .failure:
-                        responseCode = header.code
-                    }
-                    throw MTPDeviceError.mtpTransferFailed(
-                        operationCode: operationCode,
-                        containerType: header.containerType,
-                        transactionID: header.transactionID,
-                        responseCode: responseCode,
-                        declaredLength: header.containerLength,
-                        actualBytes: assembled.count,
-                        headerHex: header.headerHex
-                    )
-                }
-
-                if header.containerType != MTPContainerType.data.rawValue {
-                    throw MTPDeviceError.mtpTransferFailed(
-                        operationCode: operationCode,
-                        containerType: header.containerType,
-                        transactionID: header.transactionID,
-                        responseCode: header.code,
-                        declaredLength: header.containerLength,
-                        actualBytes: assembled.count,
-                        headerHex: header.headerHex
-                    )
-                }
-
-                guard header.code == operationCode, header.transactionID == transactionID else {
-                    throw MTPDeviceError.mtpTransferFailed(
-                        operationCode: operationCode,
-                        containerType: header.containerType,
-                        transactionID: header.transactionID,
-                        responseCode: header.code,
-                        declaredLength: header.containerLength,
-                        actualBytes: assembled.count,
-                        headerHex: header.headerHex
-                    )
-                }
-
-                if assembled.count >= Int(header.containerLength) {
-                    let result = MTPDataContainer.parse(from: assembled)
-                    switch result {
-                    case .success(let container):
-                        try validate(dataContainer: container, operationCode: operationCode, transactionID: transactionID)
-                        return AssembledDataContainer(
-                            payload: container.payload,
-                            declaredLength: header.containerLength,
-                            raw: assembled,
-                            headerHex: header.headerHex
-                        )
-                    case .failure(let err):
-                        throw MTPDeviceError.mtpTransferFailed(
-                            operationCode: operationCode,
-                            containerType: header.containerType,
-                            transactionID: header.transactionID,
-                            responseCode: 0,
-                            declaredLength: header.containerLength,
-                            actualBytes: assembled.count,
-                            headerHex: header.headerHex + " (\(err.description))"
-                        )
-                    }
-                }
+            if header.containerType == MTPContainerType.data.rawValue,
+               let operationCode, header.code != operationCode {
+                throw MTPDeviceError.receiveDataFailed("Data opcode mismatch: expected \(operationCode), got \(header.code)")
             }
-        }
+        })
     }
 
-    private func readResponseCapturingDiagnostics(
-        operationCode: UInt16,
-        transactionID: UInt32,
-        declaredLength: UInt32,
-        actualBytes: Int,
-        headerHex: String
-    ) throws -> MTPResponseContainer {
-        let receivedData: Data
-        do {
-            receivedData = try readBulkInTransfer()
-        } catch {
-            throw MTPDeviceError.mtpTransferFailed(
-                operationCode: operationCode,
-                containerType: MTPContainerType.response.rawValue,
-                transactionID: transactionID,
-                responseCode: 0,
-                declaredLength: declaredLength,
-                actualBytes: actualBytes,
-                headerHex: headerHex
-            )
+    private func readResponse(logLabel: String? = nil, transactionID: UInt32? = nil) throws -> MTPResponseContainer {
+        let received = try receiveContainer(transactionID: transactionID, responseOnly: true)
+        if let label = logLabel {
+            print("\(label) response header: \(received.header.headerHex)")
         }
-
-        switch MTPResponseContainer.parse(from: receivedData) {
-        case .success(let response):
-            return response
-        case .failure:
-            let peek = MTPContainerHeader.parse(from: receivedData)
-            throw MTPDeviceError.mtpTransferFailed(
-                operationCode: operationCode,
-                containerType: (try? peek.get())?.containerType ?? 0,
-                transactionID: (try? peek.get())?.transactionID ?? transactionID,
-                responseCode: (try? peek.get())?.code ?? 0,
-                declaredLength: (try? peek.get())?.containerLength ?? declaredLength,
-                actualBytes: receivedData.count,
-                headerHex: self.headerHex(from: receivedData)
-            )
-        }
+        return try received.responseContainer()
     }
 
-    private func readResponse() throws -> MTPResponseContainer {
-        let receivedData = try readBulkInTransfer()
-        let result = MTPResponseContainer.parse(from: receivedData)
-        
-        switch result {
-        case .success(let response):
-            return response
-        case .failure(let err):
-            throw MTPDeviceError.receiveDataFailed(err.description)
-        }
-    }
-    
     private func readData(operationCode: UInt16, transactionID: UInt32) throws -> MTPDataContainer {
-        let receiveBuffer = NSMutableData(length: MTPBulkMaxPacketSize)!
-        var receivedBytes: Int = 0
-        
-        do {
-            try bulkInPipe.__sendIORequest(with: receiveBuffer, bytesTransferred: &receivedBytes, completionTimeout: 5.0)
-        } catch {
-            throw MTPDeviceError.receiveDataFailed(error.localizedDescription)
-        }
-        
-        let receivedData = Data(bytes: receiveBuffer.bytes, count: receivedBytes)
-        let result = MTPDataContainer.parse(from: receivedData)
-        
-        switch result {
-        case .success(let dataContainer):
-            try validate(dataContainer: dataContainer, operationCode: operationCode, transactionID: transactionID)
-            let response = try readResponse()
+        let received = try receiveContainer(operationCode: operationCode, transactionID: transactionID)
+        print("MTP received container header: \(received.header.headerHex); payload bytes: \(received.payload.count)")
+        if received.header.containerType == MTPContainerType.response.rawValue {
+            let response = try received.responseContainer()
             try validate(response: response, transactionID: transactionID)
-            guard response.isOK else {
-                throw MTPDeviceError.sendCommandFailed(
-                    "Operation 0x\(String(operationCode, radix: 16, uppercase: true)) failed. Code: 0x\(String(response.responseCode, radix: 16, uppercase: true))"
-                )
-            }
-            return dataContainer
-        case .failure(let err):
-            throw MTPDeviceError.receiveDataFailed(err.description)
+            throw MTPDeviceError.mtpTransferFailed(
+                operationCode: operationCode, containerType: received.header.containerType,
+                transactionID: transactionID, responseCode: response.responseCode,
+                declaredLength: received.header.containerLength,
+                actualBytes: Int(received.header.containerLength), headerHex: received.header.headerHex)
         }
+        let data = try received.dataContainer()
+        try validate(dataContainer: data, operationCode: operationCode, transactionID: transactionID)
+        let response = try readResponse(transactionID: transactionID)
+        try validate(response: response, transactionID: transactionID)
+        guard response.isOK else {
+            throw MTPDeviceError.mtpTransferFailed(
+                operationCode: operationCode, containerType: MTPContainerType.response.rawValue,
+                transactionID: transactionID, responseCode: response.responseCode,
+                declaredLength: received.header.containerLength,
+                actualBytes: Int(received.header.containerLength), headerHex: received.header.headerHex)
+        }
+        return data
     }
 }
