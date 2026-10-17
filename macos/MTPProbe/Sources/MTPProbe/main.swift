@@ -11,6 +11,8 @@ AndroidMacBridge MTP Probe
 Usage:
   MTPProbe                     Run the default discovery / inventory probe
   MTPProbe probe              Same as default behavior
+  MTPProbe probe-diagnostic   Enumerate storage without terminating apps or logging serial numbers
+  MTPProbe probe-storage-info <storage-id>  Query one supplied ID only if enumeration is empty
   MTPProbe upload <file> [--storage-id N] [--format 0x3000] [--name filename.txt]
   MTPProbe download <file> [--name filename.txt] [--output /tmp/downloaded.bin]
   MTPProbe --help             Show this message
@@ -22,6 +24,18 @@ Examples:
 
     static func parse(_ arguments: [String]) -> (mode: String, fileURL: URL?, storageID: UInt32, format: UInt16, name: String?, outputURL: URL?) {
         let args = Array(arguments.dropFirst())
+
+        if args.first == "probe-storage-info" {
+            guard args.count == 2, parseUInt32(args[1]) != 0 else {
+                print("Usage: MTPProbe probe-storage-info <nonzero-storage-id>")
+                exit(1)
+            }
+            return ("probe-storage-info", nil, parseUInt32(args[1]), 0x3000, nil, nil)
+        }
+
+        if args.first == "probe-diagnostic" {
+            return ("probe-diagnostic", nil, 0, 0x3000, nil, nil)
+        }
 
         if args.isEmpty || args[0] == "probe" {
             return ("probe", nil, 0, 0x3000, nil, nil)
@@ -147,13 +161,14 @@ Examples:
     }
 }
 
-func runDiscoveryProbe() {
+func runDiscoveryProbe(diagnosticOnly: Bool = false, diagnosticStorageID: UInt32? = nil) {
     print("AndroidMacBridge MTP Probe")
     print("==========================\n")
     print("Searching for MTP USB devices...")
 
     do {
         let service = try USBDeviceDiscovery.findFirstMTPInterface()
+        defer { IOObjectRelease(service) }
 
         print("\nMTP interface detected")
         print("Service: \(service)")
@@ -170,25 +185,43 @@ func runDiscoveryProbe() {
             }
         }
 
-        print("\nTerminating conflicting daemons...")
-        AndroidDaemonKiller.terminateConflictingDaemons()
+        if diagnosticOnly {
+            print("\nDiagnostic probe: daemon termination disabled.")
+        } else {
+            print("\nOpening USB interface without terminating applications...")
+            print("Automatic daemon termination disabled.")
+        }
         Thread.sleep(forTimeInterval: 1.0)
 
         print("\nEstablishing MTP session...")
         let device = try MTPDevice(service: service)
         try device.openSession()
+        var closeAttempted = false
+        defer {
+            if !closeAttempted {
+                do { try device.closeSession() }
+                catch { print("Session cleanup failed: \(error)") }
+            }
+        }
 
         print("\nRetrieving basic device information...")
         let deviceInfo = try device.getDeviceInfo()
         print("Manufacturer: \(deviceInfo.manufacturer)")
         print("Model: \(deviceInfo.model)")
-        print("Serial Number: \(deviceInfo.serialNumber)")
+        if !diagnosticOnly {
+            print("Serial Number: \(deviceInfo.serialNumber)")
+        }
         print("Device Version: \(deviceInfo.deviceVersion)")
 
         print("\nEnumerating storage volumes...")
         let storageIDs = try device.getStorageIDs()
         if storageIDs.isEmpty {
-            print("No storage volumes found.")
+            if let historicalID = diagnosticStorageID {
+                print("Empty enumeration: issuing one explicitly requested GetStorageInfo diagnostic")
+                let info = try device.diagnoseStorageInfo(storageID: historicalID)
+                print("GetStorageInfo diagnostic succeeded: ID 0x\(String(info.storageID, radix: 16)), capacity \(info.maxCapacity), free bytes \(info.freeSpaceInBytes), access \(info.accessCapability)")
+            }
+            throw MTPDeviceError.receiveDataFailed("GetStorageIDs returned zero IDs. Inventory unavailable; check that the phone is unlocked and file access is allowed.")
         }
 
         for id in storageIDs {
@@ -198,6 +231,8 @@ func runDiscoveryProbe() {
             print("  Capacity: \(storageInfo.capacityString)")
             print("  Free Space: \(storageInfo.freeString)")
             print("  Access: \(storageInfo.accessCapability == 0 ? "Read/Write" : "Read Only")")
+
+            if diagnosticOnly { continue }
 
             print("\n  Root Directory:")
             let objectHandles = try device.getObjectHandles(storageID: id)
@@ -215,12 +250,15 @@ func runDiscoveryProbe() {
             }
         }
 
-        IOObjectRelease(service)
+        closeAttempted = true
+        try device.closeSession()
         print("\nMTP Probe complete.")
     } catch USBDiscoveryError.noDevicesFound {
         print("No MTP USB devices found. Please ensure an Android device is connected and unlocked in MTP (File Transfer) mode.")
+        exit(1)
     } catch {
-        print("Error during USB discovery: \(error)")
+        print("Inventory failed: \(error)")
+        exit(1)
     }
 }
 
@@ -234,19 +272,26 @@ func runUploadTest(fileURL: URL, storageID: UInt32, format: UInt16, name: String
 
     do {
         let service = try USBDeviceDiscovery.findFirstMTPInterface()
+        defer { IOObjectRelease(service) }
         print("\nMTP interface detected")
 
-        AndroidDaemonKiller.terminateConflictingDaemons()
+        print("Automatic daemon termination disabled.")
         Thread.sleep(forTimeInterval: 1.0)
 
         let device = try MTPDevice(service: service)
         try device.openSession()
+        var closeAttempted = false
+        defer {
+            if !closeAttempted {
+                do { try device.closeSession() }
+                catch { print("Session cleanup failed: \(error)") }
+            }
+        }
 
         let storageIDs = try device.getStorageIDs()
         guard !storageIDs.isEmpty else {
             print("No MTP storage volumes were found on the connected device.")
-            IOObjectRelease(service)
-            return
+            throw MTPDeviceError.receiveDataFailed("Upload aborted before SendObject")
         }
 
         let storageInfoByID = try Dictionary(uniqueKeysWithValues: storageIDs.map { id in
@@ -268,14 +313,12 @@ func runUploadTest(fileURL: URL, storageID: UInt32, format: UInt16, name: String
 
         if chosenStorageID == 0 {
             print("No writable MTP storage was found on the connected device.")
-            IOObjectRelease(service)
-            return
+            throw MTPDeviceError.receiveDataFailed("Upload aborted before SendObject")
         }
 
         if storageID != 0 && !storageIDs.contains(storageID) {
             print("Requested storage ID 0x\(String(storageID, radix: 16, uppercase: true)) was not found. Available IDs: \(storageIDs.map { "0x\(String($0, radix: 16, uppercase: true))" }.joined(separator: ", "))")
-            IOObjectRelease(service)
-            return
+            throw MTPDeviceError.receiveDataFailed("Upload aborted before SendObject")
         }
 
         print("\nUploading to storage 0x\(String(chosenStorageID, radix: 16, uppercase: true))")
@@ -287,17 +330,21 @@ func runUploadTest(fileURL: URL, storageID: UInt32, format: UInt16, name: String
             format: format
         )
 
+        closeAttempted = true
+        try device.closeSession()
+
         print("\nUpload success: \(result.filename)")
         print("Object handle: 0x\(String(result.objectHandle, radix: 16, uppercase: true))")
         print("Storage ID: 0x\(String(chosenStorageID, radix: 16, uppercase: true))")
         print("Size: \(result.objectCompressedSize) bytes")
 
-        IOObjectRelease(service)
         print("\nMac → Samsung MTP transfer test complete.")
     } catch USBDiscoveryError.noDevicesFound {
         print("No MTP USB devices found. Please ensure the Samsung is connected and in File Transfer mode.")
+        exit(1)
     } catch {
         print("Upload failed: \(error)")
+        exit(1)
     }
 }
 
@@ -326,17 +373,24 @@ func runDownloadVerify(originalURL: URL, name: String?, outputURL: URL?) {
 
     do {
         let service = try USBDeviceDiscovery.findFirstMTPInterface()
+        defer { IOObjectRelease(service) }
         print("\nMTP interface detected")
 
-        AndroidDaemonKiller.terminateConflictingDaemons()
+        print("Automatic daemon termination disabled.")
         Thread.sleep(forTimeInterval: 1.0)
 
         let device = try MTPDevice(service: service)
         try device.openSession()
+        var closeAttempted = false
+        defer {
+            if !closeAttempted {
+                do { try device.closeSession() }
+                catch { print("Session cleanup failed: \(error)") }
+            }
+        }
 
         guard let handle = try findObjectHandle(on: device, filename: targetName) else {
             print("Object named \(targetName) was not found on the device.")
-            IOObjectRelease(service)
             return
         }
 
@@ -349,6 +403,9 @@ func runDownloadVerify(originalURL: URL, name: String?, outputURL: URL?) {
         let originalData = try Data(contentsOf: originalURL)
         let originalHash = SHA256.hash(data: originalData).map { String(format: "%02x", $0) }.joined()
         let downloadedHash = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+
+        closeAttempted = true
+        try device.closeSession()
 
         print("\nDownloaded to: \(destination.path)")
         print("Original size: \(originalData.count) bytes")
@@ -363,7 +420,6 @@ func runDownloadVerify(originalURL: URL, name: String?, outputURL: URL?) {
             exit(1)
         }
 
-        IOObjectRelease(service)
         print("\nSamsung → Mac MTP GetObject test complete.")
     } catch USBDiscoveryError.noDevicesFound {
         print("No MTP USB devices found. Please ensure the Samsung is connected and in File Transfer mode.")
@@ -380,6 +436,10 @@ func runDownloadVerify(originalURL: URL, name: String?, outputURL: URL?) {
 let cli = MTPProbeCLI.parse(CommandLine.arguments)
 
 switch cli.mode {
+case "probe-storage-info":
+    runDiscoveryProbe(diagnosticOnly: true, diagnosticStorageID: cli.storageID)
+case "probe-diagnostic":
+    runDiscoveryProbe(diagnosticOnly: true)
 case "help":
     print(MTPProbeCLI.usage)
 case "upload":
