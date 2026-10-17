@@ -124,15 +124,18 @@ public struct MTPResponseContainer {
             guard containerType == MTPContainerType.response.rawValue else {
                 return .failure(.malformed("Expected response container (0x0003), got 0x\(String(containerType, radix: 16))"))
             }
-            guard containerLength <= data.count else {
+            guard let length = Int(exactly: containerLength), length <= data.count else {
                 return .failure(.malformed("ContainerLength (\(containerLength)) exceeds data size (\(data.count))"))
             }
             guard containerLength >= 12, (containerLength - 12).isMultiple(of: 4) else {
                 return .failure(.malformed("Response length must contain a 12-byte header and whole 4-byte parameters"))
             }
 
-            let paramByteCount = Int(containerLength) - 12
+            let paramByteCount = length - 12
             let paramCount = paramByteCount / 4
+            guard paramCount <= 5 else {
+                return .failure(.malformed("Response contains \(paramCount) parameters; at most 5 are supported"))
+            }
             var params: [UInt32] = []
             for i in 0..<paramCount {
                 let param = UInt32(littleEndian: (base + 12 + i * 4).loadUnaligned(as: UInt32.self))
@@ -169,19 +172,44 @@ public struct MTPDataContainer {
             guard containerType == MTPContainerType.data.rawValue else {
                 return .failure(.malformed("Expected data container (0x0002), got 0x\(String(containerType, radix: 16))"))
             }
-            guard Int(containerLength) <= data.count else {
+            guard containerLength >= 12 else {
+                return .failure(.malformed("Data container length \(containerLength) is smaller than the 12-byte header"))
+            }
+            guard let length = Int(exactly: containerLength), length <= data.count else {
                 return .failure(.malformed("ContainerLength (\(containerLength)) exceeds data size (\(data.count))"))
             }
 
             let payloadStart = 12
-            let payloadEnd = Int(containerLength)
-            let payload = data.subdata(in: payloadStart..<payloadEnd)
+            let payloadEnd = length
+            let payload = Data(raw[payloadStart..<payloadEnd])
             return .success(MTPDataContainer(operationCode: opCode, transactionID: txID, payload: payload))
         }
     }
 }
 
 public enum MTPDataPacket {
+    /// Emit one container across bounded USB writes. Only the first bytes carry
+    /// the MTP header; continuation writes contain raw payload bytes.
+    public static func write(code: UInt16, transactionID: UInt32, payload: Data,
+                             maxTransferSize: Int, endpointPacketSize: Int, send: (Data) throws -> Void) throws {
+        guard endpointPacketSize > 0, maxTransferSize > 0,
+              maxTransferSize % endpointPacketSize == 0,
+              payload.count <= Int(UInt32.max) - 12 else {
+            throw MTPParseError.malformed("Invalid MTP data transfer size")
+        }
+        let container = serialise(code: code, transactionID: transactionID, payload: payload)
+        var offset = 0
+        while offset < container.count {
+            let length = min(maxTransferSize, container.count - offset)
+            try send(container.subdata(in: offset..<(offset + length)))
+            offset += length
+        }
+        // A full final USB packet needs a short (zero-length) packet to end the data phase.
+        if container.count % endpointPacketSize == 0 {
+            try send(Data())
+        }
+    }
+
     public static func serialise(code: UInt16, transactionID: UInt32, payload: Data) -> Data {
         let totalLength = 12 + payload.count
         var data = Data(count: totalLength)
@@ -217,14 +245,14 @@ public struct MTPDataReader {
     public var bytesRemaining: Int { data.count - offset }
 
     public mutating func readUInt8() throws -> UInt8 {
-        guard offset + 1 <= data.count else { throw MTPParseError.insufficientData(needed: 1, available: bytesRemaining) }
-        let value = data[offset]
+        guard bytesRemaining >= 1 else { throw MTPParseError.insufficientData(needed: 1, available: bytesRemaining) }
+        let value = data[data.index(data.startIndex, offsetBy: offset)]
         offset += 1
         return value
     }
 
     public mutating func readUInt16() throws -> UInt16 {
-        guard offset + 2 <= data.count else { throw MTPParseError.insufficientData(needed: 2, available: bytesRemaining) }
+        guard bytesRemaining >= 2 else { throw MTPParseError.insufficientData(needed: 2, available: bytesRemaining) }
         let value = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt16 in
             UInt16(littleEndian: (raw.baseAddress! + offset).loadUnaligned(as: UInt16.self))
         }
@@ -233,7 +261,7 @@ public struct MTPDataReader {
     }
 
     public mutating func readUInt32() throws -> UInt32 {
-        guard offset + 4 <= data.count else { throw MTPParseError.insufficientData(needed: 4, available: bytesRemaining) }
+        guard bytesRemaining >= 4 else { throw MTPParseError.insufficientData(needed: 4, available: bytesRemaining) }
         let value = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt32 in
             UInt32(littleEndian: (raw.baseAddress! + offset).loadUnaligned(as: UInt32.self))
         }
@@ -242,7 +270,7 @@ public struct MTPDataReader {
     }
 
     public mutating func readUInt64() throws -> UInt64 {
-        guard offset + 8 <= data.count else { throw MTPParseError.insufficientData(needed: 8, available: bytesRemaining) }
+        guard bytesRemaining >= 8 else { throw MTPParseError.insufficientData(needed: 8, available: bytesRemaining) }
         let value = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> UInt64 in
             UInt64(littleEndian: (raw.baseAddress! + offset).loadUnaligned(as: UInt64.self))
         }
@@ -256,11 +284,13 @@ public struct MTPDataReader {
     public mutating func readMTPString() throws -> String {
         let charCount = Int(try readUInt8())
         guard charCount > 0 else { return "" }
-        let byteCount = charCount * 2  // UTF-16LE
-        guard offset + byteCount <= data.count else {
+        let byteCount = charCount * 2  // UInt8 count: at most 510 bytes, cannot overflow Int.
+        guard byteCount <= bytesRemaining else {
             throw MTPParseError.insufficientData(needed: byteCount, available: bytesRemaining)
         }
-        let stringData = data.subdata(in: offset..<(offset + byteCount))
+        let start = data.index(data.startIndex, offsetBy: offset)
+        let end = data.index(start, offsetBy: byteCount)
+        let stringData = data.subdata(in: start..<end)
         offset += byteCount
         // charCount includes trailing NUL — strip it
         let str = String(data: stringData, encoding: .utf16LittleEndian) ?? ""
@@ -270,7 +300,7 @@ public struct MTPDataReader {
     /// Read a MTP Array of UInt32 values.
     /// Format: 4-byte count, then count × UInt32.
     public mutating func readUInt32Array() throws -> [UInt32] {
-        let count = Int(try readUInt32())
+        let count = try readArrayCount(elementSize: 4)
         var result: [UInt32] = []
         result.reserveCapacity(count)
         for _ in 0..<count {
@@ -282,13 +312,23 @@ public struct MTPDataReader {
     /// Read a MTP Array of UInt16 values.
     /// Format: 4-byte count, then count × UInt16.
     public mutating func readUInt16Array() throws -> [UInt16] {
-        let count = Int(try readUInt32())
+        let count = try readArrayCount(elementSize: 2)
         var result: [UInt16] = []
         result.reserveCapacity(count)
         for _ in 0..<count {
             result.append(try readUInt16())
         }
         return result
+    }
+
+    /// Compare by division before allocation or multiplication. The count must
+    /// fit both Int and the bytes already present; no arbitrary transfer cap.
+    private mutating func readArrayCount(elementSize: Int) throws -> Int {
+        let rawCount = try readUInt32()
+        guard let count = Int(exactly: rawCount), count <= bytesRemaining / elementSize else {
+            throw MTPParseError.malformed("Array count \(rawCount) of \(elementSize)-byte elements exceeds \(bytesRemaining) available payload bytes")
+        }
+        return count
     }
 }
 
