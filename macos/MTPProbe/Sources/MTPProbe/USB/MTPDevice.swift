@@ -47,14 +47,14 @@ public class MTPDevice {
     private let bulkInPipe: IOUSBHostPipe
     private let bulkOutPipe: IOUSBHostPipe
     private let bulkOutMaxPacketSize: Int
-    private var transactionInFlight = false
     private let receiveDecoder = MTPReceiveDecoder(maximumReadSize: MTPBulkMaxPacketSize)
-
-    /// Allocates sequential IDs for regular operations in the current session.
-    private var transactionIDs = MTPTransactionIDAllocator()
+    private let coordinator = MTPSessionCoordinator()
 
     /// The session ID established by openSession(), or nil if no session is open.
-    private(set) public var sessionID: UInt32?
+    public var sessionID: UInt32? { coordinator.sessionID }
+
+    /// The current lifecycle state of the MTP session.
+    public var sessionState: MTPSessionState { coordinator.sessionState }
 
     public init(service: io_service_t) throws {
         // Log only allowlisted interface properties; do not dump the complete
@@ -132,106 +132,113 @@ public class MTPDevice {
         print("Successfully created IOUSBHostInterface and located bulk pipes.")
     }
     
-    public func openSession() throws {
-        guard sessionID == nil else {
-            throw MTPDeviceError.sendCommandFailed("This connection already owns an MTP session")
-        }
-        // MTP spec §10.5.2: Session ID must be non-zero.
-        let sessionID: UInt32 = 1
-        let command = MTPCommandContainer(
-            code: .openSession,
-            transactionID: MTPTransactionIDAllocator.openSessionTransactionID,
-            parameters: [sessionID]
-        )
-        print("OpenSession command hex: \(hexDump(command.serialise()))")
-        try writeUSBData(command.serialise())
-        let response = try readResponse(logLabel: "OpenSession")
-        try validate(response: response, transactionID: MTPTransactionIDAllocator.openSessionTransactionID)
-        if response.isOK {
-            transactionIDs = MTPTransactionIDAllocator()
-            self.sessionID = sessionID
-            print("MTP Session Opened Successfully!")
-            return
-        }
-        if response.responseCode == MTPResponseCode.sessionAlreadyOpen.rawValue {
-            // A session ID does not tell us the previous owner's next transaction ID.
-            guard response.parameters.count == 1,
-                  let existingSessionID = response.parameters.first,
-                  existingSessionID != 0 else {
-                throw MTPDeviceError.receiveDataFailed(
-                    "SessionAlreadyOpen response must contain one non-zero session ID parameter"
+    public func openSession(timeout: TimeInterval? = nil) throws {
+        try coordinator.openSession(timeout: timeout) { openTxID in
+            let sessionID: UInt32 = 1
+            let command = MTPCommandContainer(
+                code: .openSession,
+                transactionID: openTxID,
+                parameters: [sessionID]
+            )
+            print("OpenSession command hex: \(hexDump(command.serialise()))")
+            try writeUSBData(command.serialise())
+            let response = try readResponse(logLabel: "OpenSession")
+            try validate(response: response, transactionID: openTxID)
+            if response.isOK {
+                print("MTP Session Opened Successfully!")
+                return sessionID
+            }
+            if response.responseCode == MTPResponseCode.sessionAlreadyOpen.rawValue {
+                guard response.parameters.count == 1,
+                      let existingSessionID = response.parameters.first,
+                      existingSessionID != 0 else {
+                    throw MTPDeviceError.receiveDataFailed(
+                        "SessionAlreadyOpen response must contain one non-zero session ID parameter"
+                    )
+                }
+                throw MTPDeviceError.sendCommandFailed(
+                    "SessionAlreadyOpen (session ID: \(existingSessionID)). Reconnect the phone to establish a fresh session; refusing to reuse unknown transaction state."
                 )
             }
-            throw MTPDeviceError.sendCommandFailed(
-                "SessionAlreadyOpen (session ID: \(existingSessionID)). Reconnect the phone to establish a fresh session; refusing to reuse unknown transaction state."
-            )
+            throw MTPDeviceError.sendCommandFailed("Failed to open session. Code: 0x\(String(response.responseCode, radix: 16))")
         }
-        throw MTPDeviceError.sendCommandFailed("Failed to open session. Code: 0x\(String(response.responseCode, radix: 16))")
     }
     
-    public func closeSession() throws {
-        guard sessionID != nil else { return }
-        let transactionID = try sendCommand(.closeSession)
-        let response = try readResponse(logLabel: "CloseSession")
-        try validate(response: response, transactionID: transactionID)
-        guard response.isOK else {
-            throw MTPDeviceError.sendCommandFailed("CloseSession failed: 0x\(String(response.responseCode, radix: 16))")
+    public func closeSession(timeout: TimeInterval? = nil) throws {
+        try coordinator.closeSession(timeout: timeout) { scope in
+            let transactionID = try scope.allocateTransactionID()
+            let container = MTPCommandContainer(code: .closeSession, transactionID: transactionID)
+            try writeUSBData(container.serialise())
+            let response = try readResponse(logLabel: "CloseSession")
+            try validate(response: response, transactionID: transactionID)
+            guard response.isOK else {
+                throw MTPDeviceError.sendCommandFailed("CloseSession failed: 0x\(String(response.responseCode, radix: 16))")
+            }
+            try scope.completeTransaction(transactionID)
+            print("MTP Session Closed Successfully!")
         }
-        sessionID = nil
-        print("MTP Session Closed Successfully!")
     }
 
-    public func getDeviceInfo() throws -> MTPDeviceInfo {
-        let transactionID = try sendCommand(.getDeviceInfo)
-        let data = try readData(operationCode: MTPOperationCode.getDeviceInfo.rawValue, transactionID: transactionID)
-        return try MTPDeviceInfo.parse(from: data.payload)
+    public func getDeviceInfo(timeout: TimeInterval? = nil) throws -> MTPDeviceInfo {
+        try coordinator.perform(timeout: timeout) { scope in
+            let data = try executeCommand(.getDeviceInfo, scope: scope)
+            return try MTPDeviceInfo.parse(from: data.payload)
+        }
     }
     
-    public func getStorageIDs() throws -> [UInt32] {
-        let transactionID = try sendCommand(.getStorageIDs)
-        let data = try readData(operationCode: MTPOperationCode.getStorageIDs.rawValue, transactionID: transactionID)
-        var reader = MTPDataReader(data: data.payload)
-        let ids = try reader.readUInt32Array()
-        print("GetStorageIDs parsed storage IDs: \(ids.isEmpty ? "(empty)" : ids.map { "0x\(String($0, radix: 16, uppercase: true))" }.joined(separator: ", "))")
-        return ids
+    public func getStorageIDs(timeout: TimeInterval? = nil) throws -> [UInt32] {
+        try coordinator.perform(timeout: timeout) { scope in
+            let data = try executeCommand(.getStorageIDs, scope: scope)
+            var reader = MTPDataReader(data: data.payload)
+            let ids = try reader.readUInt32Array()
+            print("GetStorageIDs parsed storage IDs: \(ids.isEmpty ? "(empty)" : ids.map { "0x\(String($0, radix: 16, uppercase: true))" }.joined(separator: ", "))")
+            return ids
+        }
     }
 
-    public func getStorageInfo(storageID: UInt32) throws -> MTPStorageInfo {
-        let transactionID = try sendCommand(.getStorageInfo, parameters: [storageID])
-        let data = try readData(operationCode: MTPOperationCode.getStorageInfo.rawValue, transactionID: transactionID)
-        return try MTPStorageInfo.parse(storageID: storageID, from: data.payload)
+    public func getStorageInfo(storageID: UInt32, timeout: TimeInterval? = nil) throws -> MTPStorageInfo {
+        try coordinator.perform(timeout: timeout) { scope in
+            let data = try executeCommand(.getStorageInfo, parameters: [storageID], scope: scope)
+            return try MTPStorageInfo.parse(storageID: storageID, from: data.payload)
+        }
     }
     
     /// Explicit investigation only: accepts a caller-supplied historical ID and records response-only errors.
-    public func diagnoseStorageInfo(storageID: UInt32) throws -> MTPStorageInfo {
-        let transactionID = try sendCommand(.getStorageInfo, parameters: [storageID])
-        print("GetStorageInfo diagnostic storage ID: 0x\(String(storageID, radix: 16)); transaction ID: \(transactionID)")
-        let data = try readData(operationCode: MTPOperationCode.getStorageInfo.rawValue, transactionID: transactionID)
-        return try MTPStorageInfo.parse(storageID: storageID, from: data.payload)
+    public func diagnoseStorageInfo(storageID: UInt32, timeout: TimeInterval? = nil) throws -> MTPStorageInfo {
+        try coordinator.perform(timeout: timeout) { scope in
+            print("GetStorageInfo diagnostic storage ID: 0x\(String(storageID, radix: 16))")
+            let data = try executeCommand(.getStorageInfo, parameters: [storageID], scope: scope)
+            return try MTPStorageInfo.parse(storageID: storageID, from: data.payload)
+        }
     }
 
-    public func getObjectHandles(storageID: UInt32, format: UInt16 = 0, parent: UInt32 = 0xFFFFFFFF) throws -> [UInt32] {
-        let transactionID = try sendCommand(.getObjectHandles, parameters: [storageID, UInt32(format), parent])
-        let data = try readData(operationCode: MTPOperationCode.getObjectHandles.rawValue, transactionID: transactionID)
-        var reader = MTPDataReader(data: data.payload)
-        return try reader.readUInt32Array()
+    public func getObjectHandles(storageID: UInt32, format: UInt16 = 0, parent: UInt32 = 0xFFFFFFFF, timeout: TimeInterval? = nil) throws -> [UInt32] {
+        try coordinator.perform(timeout: timeout) { scope in
+            let data = try executeCommand(.getObjectHandles, parameters: [storageID, UInt32(format), parent], scope: scope)
+            var reader = MTPDataReader(data: data.payload)
+            return try reader.readUInt32Array()
+        }
     }
     
-    public func getObjectInfo(objectHandle: UInt32) throws -> MTPObjectInfo {
-        let transactionID = try sendCommand(.getObjectInfo, parameters: [objectHandle])
-        let data = try readData(operationCode: MTPOperationCode.getObjectInfo.rawValue, transactionID: transactionID)
-        return try MTPObjectInfo.parse(objectHandle: objectHandle, from: data.payload)
+    public func getObjectInfo(objectHandle: UInt32, timeout: TimeInterval? = nil) throws -> MTPObjectInfo {
+        try coordinator.perform(timeout: timeout) { scope in
+            let data = try executeCommand(.getObjectInfo, parameters: [objectHandle], scope: scope)
+            return try MTPObjectInfo.parse(objectHandle: objectHandle, from: data.payload)
+        }
     }
 
     /// Stream the GetObject data phase into temporary storage, then require OK.
     /// The existing Data API returns a read-only file mapping, not a heap copy.
-    public func getObject(handle: UInt32) throws -> Data {
-        let txID = try allocateTransaction()
-        let command = MTPCommandContainer(code: .getObject, transactionID: txID, parameters: [handle])
-        try writeUSBData(command.serialise())
-        return try readData(operationCode: MTPOperationCode.getObject.rawValue, transactionID: txID).payload
+    public func getObject(handle: UInt32, timeout: TimeInterval? = nil) throws -> Data {
+        try coordinator.perform(timeout: timeout) { scope in
+            let txID = try scope.allocateTransactionID()
+            let command = MTPCommandContainer(code: .getObject, transactionID: txID, parameters: [handle])
+            try writeUSBData(command.serialise())
+            let data = try readData(operationCode: MTPOperationCode.getObject.rawValue, transactionID: txID)
+            try scope.completeTransaction(txID)
+            return data.payload
+        }
     }
-
 
     /// Send a file's metadata to Android, receive the assigned object handle, then upload raw bytes and verify the resulting metadata.
     public func uploadFile(
@@ -239,32 +246,37 @@ public class MTPDevice {
         storageID: UInt32,
         parentHandle: UInt32 = 0xFFFFFFFF,
         filename: String? = nil,
-        format: UInt16 = 0x3000
+        format: UInt16 = 0x3000,
+        timeout: TimeInterval? = nil
     ) throws -> MTPObjectInfo {
         let fileData = try Data(contentsOf: fileURL)
         let targetName = filename ?? fileURL.lastPathComponent
 
-        let objectHandle = try sendObjectInfo(
-            storageID: storageID,
-            parentHandle: parentHandle,
-            filename: targetName,
-            fileSize: UInt64(fileData.count),
-            format: format
-        )
+        return try coordinator.perform(timeout: timeout) { scope in
+            let objectHandle = try sendObjectInfoInternal(
+                storageID: storageID,
+                parentHandle: parentHandle,
+                filename: targetName,
+                fileSize: UInt64(fileData.count),
+                format: format,
+                scope: scope
+            )
 
-        print("SendObjectInfo: OK")
-        print("Object Handle: 0x\(String(objectHandle, radix: 16, uppercase: true))")
+            print("SendObjectInfo: OK")
+            print("Object Handle: 0x\(String(objectHandle, radix: 16, uppercase: true))")
 
-        _ = try sendObject(fileData: fileData, objectHandle: objectHandle)
-        print("SendObject: OK")
+            _ = try sendObjectInternal(fileData: fileData, objectHandle: objectHandle, scope: scope)
+            print("SendObject: OK")
 
-        let objectInfo = try getObjectInfo(objectHandle: objectHandle)
-        print("GetObjectInfo: OK")
-        guard UInt64(objectInfo.objectCompressedSize) == UInt64(fileData.count) else {
-            throw MTPDeviceError.receiveDataFailed("Uploaded object size mismatch: expected \(fileData.count), got \(objectInfo.objectCompressedSize)")
+            let data = try executeCommand(.getObjectInfo, parameters: [objectHandle], scope: scope)
+            let objectInfo = try MTPObjectInfo.parse(objectHandle: objectHandle, from: data.payload)
+            print("GetObjectInfo: OK")
+            guard UInt64(objectInfo.objectCompressedSize) == UInt64(fileData.count) else {
+                throw MTPDeviceError.receiveDataFailed("Uploaded object size mismatch: expected \(fileData.count), got \(objectInfo.objectCompressedSize)")
+            }
+            print("Upload metadata size verified; content verification requires download and SHA-256 comparison")
+            return objectInfo
         }
-        print("Upload metadata size verified; content verification requires download and SHA-256 comparison")
-        return objectInfo
     }
 
     /// Announce a file's metadata to Android and request a new object handle.
@@ -274,9 +286,32 @@ public class MTPDevice {
         filename: String,
         fileSize: UInt64,
         format: UInt16 = 0x3000,
-        protectionStatus: UInt16 = 0
+        protectionStatus: UInt16 = 0,
+        timeout: TimeInterval? = nil
     ) throws -> UInt32 {
-        let txID = try allocateTransaction()
+        try coordinator.perform(timeout: timeout) { scope in
+            try sendObjectInfoInternal(
+                storageID: storageID,
+                parentHandle: parentHandle,
+                filename: filename,
+                fileSize: fileSize,
+                format: format,
+                protectionStatus: protectionStatus,
+                scope: scope
+            )
+        }
+    }
+
+    private func sendObjectInfoInternal(
+        storageID: UInt32,
+        parentHandle: UInt32,
+        filename: String,
+        fileSize: UInt64,
+        format: UInt16 = 0x3000,
+        protectionStatus: UInt16 = 0,
+        scope: MTPTransactionScope
+    ) throws -> UInt32 {
+        let txID = try scope.allocateTransactionID()
         let dataSet = MTPObjectInfoDataset.serialise(
             storageID: storageID,
             parentObject: parentHandle,
@@ -309,17 +344,19 @@ public class MTPDevice {
         guard response.parameters.count == 3, response.parameters[2] != 0 else {
             throw MTPDeviceError.receiveDataFailed("SendObjectInfo returned no valid object handle")
         }
+        try scope.completeTransaction(txID)
         return response.parameters[2]
     }
 
     /// Sends a file payload to the phone over the MTP bulk OUT pipe.
-    ///
-    /// This is the real data-transfer phase of the upload flow:
-    /// 1. SendObjectInfo is used to announce metadata and obtain the object handle.
-    /// 2. SendObject streams the raw file bytes.
-    /// 3. The device replies with a final response container indicating success/failure.
-    public func sendObject(fileData: Data, objectHandle: UInt32 = 0) throws -> UInt32 {
-        let txID = try allocateTransaction()
+    public func sendObject(fileData: Data, objectHandle: UInt32 = 0, timeout: TimeInterval? = nil) throws -> UInt32 {
+        try coordinator.perform(timeout: timeout) { scope in
+            try sendObjectInternal(fileData: fileData, objectHandle: objectHandle, scope: scope)
+        }
+    }
+
+    private func sendObjectInternal(fileData: Data, objectHandle: UInt32 = 0, scope: MTPTransactionScope) throws -> UInt32 {
+        let txID = try scope.allocateTransactionID()
         let command = MTPCommandContainer(code: .sendObject, transactionID: txID)
         do {
             try writeUSBData(command.serialise())
@@ -357,27 +394,20 @@ public class MTPDevice {
             throw MTPDeviceError.sendCommandFailed("SendObject failed. Code: 0x\(String(response.responseCode, radix: 16))")
         }
 
+        try scope.completeTransaction(txID)
         return response.parameters.first ?? 0
     }
     
     // MARK: - Private Helpers
     
-    private func allocateTransaction() throws -> UInt32 {
-        guard !transactionInFlight else {
-            throw MTPDeviceError.sendCommandFailed("Previous MTP transaction is incomplete; reconnect the phone before issuing another command")
-        }
-        transactionInFlight = true
-        return transactionIDs.allocate()
-    }
-
-    @discardableResult
-    private func sendCommand(_ code: MTPOperationCode, parameters: [UInt32] = []) throws -> UInt32 {
-        let txID = try allocateTransaction()
+    private func executeCommand(_ code: MTPOperationCode, parameters: [UInt32] = [], scope: MTPTransactionScope) throws -> MTPDataContainer {
+        let txID = try scope.allocateTransactionID()
         let container = MTPCommandContainer(code: code, transactionID: txID, parameters: parameters)
         print("MTP command opcode: 0x\(String(code.rawValue, radix: 16)), transaction ID: \(txID)")
-        let data = container.serialise()
-        try writeUSBData(data)
-        return txID
+        try writeUSBData(container.serialise())
+        let data = try readData(operationCode: code.rawValue, transactionID: txID)
+        try scope.completeTransaction(txID)
+        return data
     }
 
     private func validate(dataContainer: MTPDataContainer, operationCode: UInt16, transactionID: UInt32) throws {
@@ -399,7 +429,6 @@ public class MTPDevice {
                 "Response transaction ID mismatch: expected \(transactionID), got \(response.transactionID)"
             )
         }
-    transactionInFlight = false
     }
 
     private func writeUSBData(_ data: Data) throws {
@@ -446,18 +475,29 @@ public class MTPDevice {
     private func receiveContainer(operationCode: UInt16? = nil,
                                   transactionID: UInt32? = nil,
                                   responseOnly: Bool = false) throws -> MTPReceivedContainer {
-        try receiveDecoder.receiveStored(read: { try self.readBulkInTransfer() }, onHeader: { header in
-            if let transactionID, header.transactionID != transactionID {
-                throw MTPDeviceError.receiveDataFailed("Container transaction ID mismatch: expected \(transactionID), got \(header.transactionID)")
+        if receiveDecoder.isFailed {
+            coordinator.fail(reason: "MTP receive framing failed")
+            throw MTPFramingError.failed
+        }
+        do {
+            return try receiveDecoder.receiveStored(read: { try self.readBulkInTransfer() }, onHeader: { header in
+                if let transactionID, header.transactionID != transactionID {
+                    throw MTPDeviceError.receiveDataFailed("Container transaction ID mismatch: expected \(transactionID), got \(header.transactionID)")
+                }
+                if responseOnly && header.containerType != MTPContainerType.response.rawValue {
+                    throw MTPParseError.invalidContainerType(header.containerType)
+                }
+                if header.containerType == MTPContainerType.data.rawValue,
+                   let operationCode, header.code != operationCode {
+                    throw MTPDeviceError.receiveDataFailed("Data opcode mismatch: expected \(operationCode), got \(header.code)")
+                }
+            })
+        } catch {
+            if receiveDecoder.isFailed {
+                coordinator.fail(reason: error.localizedDescription)
             }
-            if responseOnly && header.containerType != MTPContainerType.response.rawValue {
-                throw MTPParseError.invalidContainerType(header.containerType)
-            }
-            if header.containerType == MTPContainerType.data.rawValue,
-               let operationCode, header.code != operationCode {
-                throw MTPDeviceError.receiveDataFailed("Data opcode mismatch: expected \(operationCode), got \(header.code)")
-            }
-        })
+            throw error
+        }
     }
 
     private func readResponse(logLabel: String? = nil, transactionID: UInt32? = nil) throws -> MTPResponseContainer {
