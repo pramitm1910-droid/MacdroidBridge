@@ -25,6 +25,8 @@ public enum MTPSerializationError: Error, CustomStringConvertible, Equatable {
     case sessionPoisoned(reason: String)
     case timedOut(waitedSeconds: TimeInterval)
     case cancelled
+    case transferCancelled(reason: String)
+    case deviceDisconnected(reason: String)
     case inFlightTransactionActive
     case sessionNotActive
     case openSessionFailed(String)
@@ -40,6 +42,10 @@ public enum MTPSerializationError: Error, CustomStringConvertible, Equatable {
             return "MTP operation timed out waiting for session access after \(String(format: "%.3f", waited))s"
         case .cancelled:
             return "MTP operation was cancelled while waiting for session access"
+        case .transferCancelled(let reason):
+            return "MTP transfer was cancelled: \(reason)"
+        case .deviceDisconnected(let reason):
+            return "MTP device disconnected: \(reason)"
         case .inFlightTransactionActive:
             return "Previous MTP transaction is incomplete; refusing to interleave operations"
         case .sessionNotActive:
@@ -115,7 +121,9 @@ public final class MTPSessionCoordinator {
         var isReady = false
         var isCancelled = false
         var isPoisoned = false
+        var isDisconnected = false
         var poisonReason = ""
+        var disconnectReason = ""
     }
 
     private let condition = NSCondition()
@@ -184,6 +192,35 @@ public final class MTPSessionCoordinator {
         isExecuting = false
         executingThread = nil
         condition.broadcast()
+    }
+
+    /// Explicitly mark the session as disconnected (e.g. following USB cable pull or shutdown).
+    /// Wakes all waiting operations immediately with deviceDisconnected and permanently rejects future requests.
+    public func disconnect(reason: String) {
+        condition.lock()
+        defer { condition.unlock() }
+        state = .failed(description: "Device disconnected: \(reason)")
+        for w in waiters {
+            w.isDisconnected = true
+            w.disconnectReason = reason
+        }
+        waiters.removeAll()
+        condition.broadcast()
+
+        // If an operation is currently executing on a foreign thread, wait with a bounded deadline (2.0s)
+        // for it to complete its closure and release execution ownership.
+        if isExecuting && executingThread != Thread.current {
+            let deadline = Date().addingTimeInterval(2.0)
+            while isExecuting && Date() < deadline {
+                condition.wait(until: deadline)
+            }
+        }
+
+        // Only clear isExecuting if no thread is executing (or the foreign execution has finished).
+        // If the current thread itself called disconnect, releaseExclusive will clear it upon exit.
+        if executingThread == nil {
+            isExecuting = false
+        }
     }
 
     /// Cancel all currently queued operations waiting for session access.
@@ -320,6 +357,9 @@ public final class MTPSessionCoordinator {
         func checkState() throws {
             switch state {
             case .failed(let reason):
+                if reason.hasPrefix("Device disconnected") {
+                    throw MTPSerializationError.deviceDisconnected(reason: reason)
+                }
                 throw MTPSerializationError.sessionPoisoned(reason: reason)
             case .closed:
                 if allowedStateCategory != .closedOnly {
@@ -356,6 +396,13 @@ public final class MTPSessionCoordinator {
         waiters.append(waiter)
 
         while true {
+            if waiter.isDisconnected {
+                waiters.removeAll { $0 === waiter }
+                if waiter.isReady {
+                    handoffNextWaiterLocked()
+                }
+                throw MTPSerializationError.deviceDisconnected(reason: waiter.disconnectReason)
+            }
             if waiter.isCancelled {
                 waiters.removeAll { $0 === waiter }
                 if waiter.isReady {
@@ -425,7 +472,7 @@ public final class MTPSessionCoordinator {
         executingThread = nil
         while !waiters.isEmpty {
             let next = waiters.removeFirst()
-            if !next.isCancelled && !next.isPoisoned {
+            if !next.isCancelled && !next.isPoisoned && !next.isDisconnected {
                 next.isReady = true
                 isExecuting = true
                 condition.broadcast()
@@ -433,5 +480,6 @@ public final class MTPSessionCoordinator {
             }
         }
         isExecuting = false
+        condition.broadcast()
     }
 }

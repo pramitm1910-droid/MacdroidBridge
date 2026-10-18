@@ -535,6 +535,12 @@ final class MTPSessionCoordinatorTests: XCTestCase {
             closeGroup.leave()
         }
 
+        // Ensure Thread 2 has enqueued before queuing Thread 3
+        let waitDeadline = Date().addingTimeInterval(1.0)
+        while coordinator.queuedWaiterCount < 1 && Date() < waitDeadline {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+
         // Thread 3 queues perform behind closeSession while session is still active
         performGroup.enter()
         DispatchQueue.global().async {

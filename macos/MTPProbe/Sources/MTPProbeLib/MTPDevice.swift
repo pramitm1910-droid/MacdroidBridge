@@ -1,13 +1,16 @@
 import Foundation
 import IOKit
+#if canImport(IOUSBHost)
 import IOUSBHost
-import MTPProbeLib
+#endif
 
-public enum MTPDeviceError: Error, CustomStringConvertible {
+public enum MTPDeviceError: Error, CustomStringConvertible, Equatable {
     case failedToCreateInterface
     case pipesNotFound
     case sendCommandFailed(String)
     case receiveDataFailed(String)
+    case deviceDisconnected(String)
+    case transferAborted(String)
     case mtpTransferFailed(
         operationCode: UInt16,
         containerType: UInt16,
@@ -28,6 +31,10 @@ public enum MTPDeviceError: Error, CustomStringConvertible {
             return message
         case .receiveDataFailed(let message):
             return message
+        case .deviceDisconnected(let message):
+            return "MTP device disconnected: \(message)"
+        case .transferAborted(let message):
+            return "MTP transfer aborted: \(message)"
         case .mtpTransferFailed(let operationCode, let containerType, let transactionID, let responseCode, let declaredLength, let actualBytes, let headerHex):
             return """
             MTP transfer failed
@@ -43,12 +50,11 @@ public enum MTPDeviceError: Error, CustomStringConvertible {
 }
 
 public class MTPDevice {
-    private let interface: IOUSBHostInterface
-    private let bulkInPipe: IOUSBHostPipe
-    private let bulkOutPipe: IOUSBHostPipe
-    private let bulkOutMaxPacketSize: Int
+    private let transport: MTPTransport
     private let receiveDecoder = MTPReceiveDecoder(maximumReadSize: MTPBulkMaxPacketSize)
     private let coordinator = MTPSessionCoordinator()
+    private let shutdownLock = NSLock()
+    private var isShutdown = false
 
     /// The session ID established by openSession(), or nil if no session is open.
     public var sessionID: UInt32? { coordinator.sessionID }
@@ -56,80 +62,49 @@ public class MTPDevice {
     /// The current lifecycle state of the MTP session.
     public var sessionState: MTPSessionState { coordinator.sessionState }
 
-    public init(service: io_service_t) throws {
-        // Log only allowlisted interface properties; do not dump the complete
-        // registry dictionary because it may contain device identifiers.
-        var properties: Unmanaged<CFMutableDictionary>?
-        let propertiesResult = IORegistryEntryCreateCFProperties(service, &properties, kCFAllocatorDefault, 0)
-        if propertiesResult == kIOReturnSuccess,
-           let registryProperties = properties?.takeRetainedValue() as? [String: Any] {
-            let safeKeys = [
-                "idVendor", "idProduct", "bInterfaceNumber", "bInterfaceClass",
-                "bInterfaceSubClass", "bInterfaceProtocol", "USB Interface Number",
-                "USB Interface Class", "USB Interface Subclass", "USB Interface Protocol"
-            ]
-            let summary = safeKeys.compactMap { key in
-                registryProperties[key].map { "\(key)=\($0)" }
-            }.joined(separator: ", ")
-            print("MTP interface service properties: \(summary.isEmpty ? "(no allowlisted properties found)" : summary)")
-        } else {
-            print("MTP interface service properties unavailable (IORegistry result: \(propertiesResult))")
-        }
+    /// Whether the device has been disconnected or shut down.
+    public var isDisconnected: Bool {
+        shutdownLock.lock()
+        defer { shutdownLock.unlock() }
+        return isShutdown || coordinator.isFailed
+    }
 
-        // USBDeviceDiscovery matches IOUSBHostInterface objects by MTP class,
-        // subclass, and protocol, and the probe passes that service here.
-        let intf: IOUSBHostInterface
-        do {
-            intf = try IOUSBHostInterface(__ioService: service, options: [], queue: nil, interestHandler: nil)
-        } catch {
-            let nsError = error as NSError
-            print("IOUSBHostInterface initialization error: \(String(describing: error))")
-            print("IOUSBHostInterface NSError domain: \(nsError.domain), code: \(nsError.code), description: \(nsError.localizedDescription)")
-            throw MTPDeviceError.failedToCreateInterface
+    /// Initialize with an injected MTPTransport (useful for unit tests and mocks).
+    public init(transport: MTPTransport) {
+        self.transport = transport
+    }
+
+#if canImport(IOUSBHost)
+    /// Initialize with an active IOKit USB interface service.
+    public convenience init(service: io_service_t) throws {
+        let usbTransport = try IOUSBHostMTPTransport(service: service)
+        self.init(transport: usbTransport)
+    }
+#endif
+
+    deinit {
+        disconnect(reason: "MTPDevice deallocated")
+    }
+
+    /// Idempotently disconnect and shut down the device, aborting in-flight I/O,
+    /// waking queued operations with deviceDisconnected, and releasing USB handles.
+    public func shutdown() {
+        disconnect(reason: "Explicit device shutdown requested")
+    }
+
+    /// Explicitly mark the device as disconnected.
+    public func disconnect(reason: String = "Device disconnected") {
+        shutdownLock.lock()
+        if isShutdown {
+            shutdownLock.unlock()
+            return
         }
-        
-        self.interface = intf
-        
-        let confDesc = intf.configurationDescriptor
-        let intfDesc = intf.interfaceDescriptor
-        var epDesc = IOUSBGetNextEndpointDescriptor(confDesc, intfDesc, nil)
-        
-        var foundIn: IOUSBHostPipe?
-        var foundOut: IOUSBHostPipe?
-        var outPacketSize = 0
-        
-        while let desc = epDesc {
-            let addr = IOUSBGetEndpointAddress(desc)
-            let dir = IOUSBGetEndpointDirection(desc)
-            let type = IOUSBGetEndpointType(desc)
-            
-            // Raw values from AppleUSBDefinitions.h:
-            // Type Bulk = 2
-            // Direction In = 1
-            // Direction Out = 0
-            if type == 2 {
-                if dir == 1, foundIn == nil {
-                    foundIn = try? intf.copyPipe(withAddress: Int(addr))
-                } else if dir == 0, foundOut == nil {
-                    foundOut = try? intf.copyPipe(withAddress: Int(addr))
-                    outPacketSize = Int(UInt16(littleEndian: desc.pointee.wMaxPacketSize) & 0x07ff)
-                }
-            }
-            
-            // Get the next descriptor
-            epDesc = IOUSBGetNextEndpointDescriptor(confDesc, intfDesc, UnsafeRawPointer(desc).assumingMemoryBound(to: IOUSBDescriptorHeader.self))
-        }
-        
-        guard let bulkIn = foundIn, let bulkOut = foundOut, outPacketSize > 0 else {
-            throw MTPDeviceError.pipesNotFound
-        }
-        
-        self.bulkInPipe = bulkIn
-        self.bulkOutPipe = bulkOut
-        self.bulkOutMaxPacketSize = outPacketSize
-        print("Bulk OUT endpoint packet size: \(outPacketSize)")
-        
-        print("Successfully created IOUSBHostInterface and located bulk pipes.")
+        isShutdown = true
+        shutdownLock.unlock()
+
+        transport.abort()
+        coordinator.disconnect(reason: reason)
+        transport.close()
     }
     
     public func openSession(timeout: TimeInterval? = nil) throws {
@@ -370,7 +345,7 @@ public class MTPDevice {
         try MTPDataPacket.write(code: MTPOperationCode.sendObject.rawValue,
                                 transactionID: txID, payload: fileData,
                                 maxTransferSize: MTPBulkMaxPacketSize,
-                                endpointPacketSize: bulkOutMaxPacketSize) { packet in
+                                endpointPacketSize: transport.bulkOutMaxPacketSize) { packet in
             do {
                 try writeUSBData(packet)
                 if packet.isEmpty { print("SendObject USB zero-length terminator sent") }
@@ -431,32 +406,28 @@ public class MTPDevice {
         }
     }
 
-    private func writeUSBData(_ data: Data) throws {
-        // IOUSBHost sends a zero-length USB packet when the buffer is nil.
-        let mutableData: NSMutableData? = data.isEmpty ? nil : NSMutableData(data: data)
-        var transferred: Int = 0
-
+    private func writeUSBData(_ data: Data, timeout: TimeInterval = 5.0) throws {
         do {
-            try bulkOutPipe.__sendIORequest(with: mutableData, bytesTransferred: &transferred, completionTimeout: 5.0)
-            guard transferred == data.count else {
-                throw MTPDeviceError.sendCommandFailed("Short USB write: expected \(data.count) bytes, transferred \(transferred)")
-            }
+            try transport.write(data: data, timeout: timeout)
         } catch {
-            throw MTPDeviceError.sendCommandFailed(error.localizedDescription)
+            if transport.isTerminalError(error) {
+                disconnect(reason: error.localizedDescription)
+                throw MTPDeviceError.deviceDisconnected(error.localizedDescription)
+            }
+            throw error
         }
     }
     
-    private func readBulkInTransfer() throws -> Data {
-        let receiveBuffer = NSMutableData(length: MTPBulkMaxPacketSize)!
-        var receivedBytes: Int = 0
-
+    private func readBulkInTransfer(timeout: TimeInterval = 5.0) throws -> Data {
         do {
-            try bulkInPipe.__sendIORequest(with: receiveBuffer, bytesTransferred: &receivedBytes, completionTimeout: 5.0)
+            return try transport.read(maxSize: MTPBulkMaxPacketSize, timeout: timeout)
         } catch {
-            throw MTPDeviceError.receiveDataFailed(error.localizedDescription)
+            if transport.isTerminalError(error) {
+                disconnect(reason: error.localizedDescription)
+                throw MTPDeviceError.deviceDisconnected(error.localizedDescription)
+            }
+            throw error
         }
-
-        return Data(bytes: receiveBuffer.bytes, count: receivedBytes)
     }
 
     private func hexDump(_ data: Data, limit: Int = 256) -> String {
@@ -493,7 +464,9 @@ public class MTPDevice {
                 }
             })
         } catch {
-            if receiveDecoder.isFailed {
+            if transport.isTerminalError(error) {
+                disconnect(reason: error.localizedDescription)
+            } else if receiveDecoder.isFailed {
                 coordinator.fail(reason: error.localizedDescription)
             }
             throw error
