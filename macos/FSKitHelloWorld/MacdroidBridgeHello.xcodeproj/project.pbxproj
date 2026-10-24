@@ -1,0 +1,292 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		000000000000000000000014 /* Extension/HelloExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000001 /* Extension/HelloExtension.swift */; };
+		000000000000000000000015 /* Sources/HelloFS/HelloFileSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000003 /* Sources/HelloFS/HelloFileSystem.swift */; };
+		000000000000000000000016 /* Sources/HelloFS/HelloVolume.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000004 /* Sources/HelloFS/HelloVolume.swift */; };
+		000000000000000000000017 /* Sources/HelloFS/MemoryTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000005 /* Sources/HelloFS/MemoryTree.swift */; };
+		00000000000000000000001B /* MacdroidBridgeFS.appex in Embed FSKit Extension */ = {isa = PBXBuildFile; fileRef = 00000000000000000000000A /* MacdroidBridgeFS.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		000000000000000000000020 /* Host/HelloHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000002 /* Host/HelloHost.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		FE6E114D308A964200122F85 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000023 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000000000000000000019;
+			remoteInfo = MacdroidBridgeFS;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		00000000000000000000001C /* Embed FSKit Extension */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(CONTENTS_FOLDER_PATH)/Extensions";
+			dstSubfolderSpec = 16;
+			files = (
+				00000000000000000000001B /* MacdroidBridgeFS.appex in Embed FSKit Extension */,
+			);
+			name = "Embed FSKit Extension";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		000000000000000000000001 /* Extension/HelloExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/HelloExtension.swift; sourceTree = "<group>"; };
+		000000000000000000000002 /* Host/HelloHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Host/HelloHost.swift; sourceTree = "<group>"; };
+		000000000000000000000003 /* Sources/HelloFS/HelloFileSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/HelloFS/HelloFileSystem.swift; sourceTree = "<group>"; };
+		000000000000000000000004 /* Sources/HelloFS/HelloVolume.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/HelloFS/HelloVolume.swift; sourceTree = "<group>"; };
+		000000000000000000000005 /* Sources/HelloFS/MemoryTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/HelloFS/MemoryTree.swift; sourceTree = "<group>"; };
+		000000000000000000000006 /* Config/Extension-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Config/Extension-Info.plist"; sourceTree = "<group>"; };
+		000000000000000000000007 /* Config/Host-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Config/Host-Info.plist"; sourceTree = "<group>"; };
+		000000000000000000000008 /* Config/Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config/Extension.entitlements; sourceTree = "<group>"; };
+		000000000000000000000009 /* Config/Host.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Config/Host.entitlements; sourceTree = "<group>"; };
+		00000000000000000000000A /* MacdroidBridgeFS.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.extensionkit-extension"; includeInIndex = 0; path = MacdroidBridgeFS.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		00000000000000000000000B /* MacdroidBridgeHello.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacdroidBridgeHello.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		00000000000000000000000C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				00000000000000000000000B /* MacdroidBridgeHello.app */,
+				00000000000000000000000A /* MacdroidBridgeFS.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		00000000000000000000000D = {
+			isa = PBXGroup;
+			children = (
+				000000000000000000000001 /* Extension/HelloExtension.swift */,
+				000000000000000000000002 /* Host/HelloHost.swift */,
+				000000000000000000000003 /* Sources/HelloFS/HelloFileSystem.swift */,
+				000000000000000000000004 /* Sources/HelloFS/HelloVolume.swift */,
+				000000000000000000000005 /* Sources/HelloFS/MemoryTree.swift */,
+				000000000000000000000006 /* Config/Extension-Info.plist */,
+				000000000000000000000007 /* Config/Host-Info.plist */,
+				000000000000000000000008 /* Config/Extension.entitlements */,
+				000000000000000000000009 /* Config/Host.entitlements */,
+				00000000000000000000000C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		000000000000000000000019 /* MacdroidBridgeFS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000000000000000000013 /* Build configuration list for PBXNativeTarget "MacdroidBridgeFS" */;
+			buildPhases = (
+				000000000000000000000018 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MacdroidBridgeFS;
+			productName = MacdroidBridgeFS;
+			productReference = 00000000000000000000000A /* MacdroidBridgeFS.appex */;
+			productType = "com.apple.product-type.extensionkit-extension";
+		};
+		000000000000000000000022 /* MacdroidBridgeHello */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 00000000000000000000001F /* Build configuration list for PBXNativeTarget "MacdroidBridgeHello" */;
+			buildPhases = (
+				000000000000000000000021 /* Sources */,
+				00000000000000000000001C /* Embed FSKit Extension */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				00000000000000000000001A /* PBXTargetDependency */,
+			);
+			name = MacdroidBridgeHello;
+			productName = MacdroidBridgeHello;
+			productReference = 00000000000000000000000B /* MacdroidBridgeHello.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		000000000000000000000023 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 2710;
+			};
+			buildConfigurationList = 000000000000000000000010 /* Build configuration list for PBXProject "MacdroidBridgeHello" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 00000000000000000000000D;
+			productRefGroup = 00000000000000000000000C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				000000000000000000000022 /* MacdroidBridgeHello */,
+				000000000000000000000019 /* MacdroidBridgeFS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		000000000000000000000018 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000000000000000000014 /* Extension/HelloExtension.swift in Sources */,
+				000000000000000000000015 /* Sources/HelloFS/HelloFileSystem.swift in Sources */,
+				000000000000000000000016 /* Sources/HelloFS/HelloVolume.swift in Sources */,
+				000000000000000000000017 /* Sources/HelloFS/MemoryTree.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		000000000000000000000021 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				000000000000000000000020 /* Host/HelloHost.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		00000000000000000000001A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 000000000000000000000019 /* MacdroidBridgeFS */;
+			targetProxy = FE6E114D308A964200122F85 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		00000000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		00000000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				SDKROOT = macosx;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		000000000000000000000011 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/Extension.entitlements;
+				DEVELOPMENT_TEAM = 4662TD2T6F;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Extension-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = org.macdroidbridge.hello.filesystem;
+				PRODUCT_NAME = MacdroidBridgeFS;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		000000000000000000000012 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = Config/Extension.entitlements;
+				DEVELOPMENT_TEAM = 4662TD2T6F;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Extension-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = org.macdroidbridge.hello.filesystem;
+				PRODUCT_NAME = MacdroidBridgeFS;
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+		00000000000000000000001D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/Host.entitlements;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Host-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = org.macdroidbridge.hello;
+				PRODUCT_NAME = MacdroidBridgeHello;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		00000000000000000000001E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Config/Host.entitlements;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "Config/Host-Info.plist";
+				PRODUCT_BUNDLE_IDENTIFIER = org.macdroidbridge.hello;
+				PRODUCT_NAME = MacdroidBridgeHello;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		000000000000000000000010 /* Build configuration list for PBXProject "MacdroidBridgeHello" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				00000000000000000000000E /* Debug */,
+				00000000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		000000000000000000000013 /* Build configuration list for PBXNativeTarget "MacdroidBridgeFS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000000000011 /* Debug */,
+				000000000000000000000012 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		00000000000000000000001F /* Build configuration list for PBXNativeTarget "MacdroidBridgeHello" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				00000000000000000000001D /* Debug */,
+				00000000000000000000001E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 000000000000000000000023 /* Project object */;
+}
