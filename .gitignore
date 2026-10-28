@@ -1,0 +1,11 @@
+.DS_Store
+.build/
+.swiftpm/
+__pycache__/
+*.py[cod]
+*.dSYM/
+DerivedData/
+xcuserdata/
+/mtp-storage-investigation/
+/b1-i-exploratory-development/
+/governance-recovery-review/
