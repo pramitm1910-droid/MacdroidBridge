@@ -1,6 +1,7 @@
 import Foundation
 import FSKit
 import Darwin
+import MTPMetadataContracts
 
 final class HelloFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     static let volumeUUID = UUID(uuidString: "37A73867-96C0-456C-B465-CB775589F02A")!
@@ -12,9 +13,13 @@ final class HelloFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         var validate: (URL) throws -> Void = HelloFileSystem.validateStub
     }
     private let access: PathAccess
+    /// Injection point for a future XPC client. The shipped extension leaves this nil.
+    private let metadataSourceFactory: (() throws -> MTPMetadataSource)?
     private let lock = NSLock()
     private var loaded: FSResource?
-    init(access: PathAccess = PathAccess()) { self.access = access; super.init() }
+    init(access: PathAccess = PathAccess(), metadataSourceFactory: (() throws -> MTPMetadataSource)? = nil) {
+        self.access = access; self.metadataSourceFactory = metadataSourceFactory; super.init()
+    }
     deinit {
         if let path = loaded as? FSPathURLResource { access.stop(path.url) }
     }
@@ -61,12 +66,19 @@ final class HelloFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
     }
     // These seams also exercise the exact callback implementation without constructing
     // OS-owned FSTaskOptions (which has no public initializer in the 26.5 SDK).
-    func load(_ resource: FSResource, arguments: [String] = []) throws -> HelloVolume {
+    func load(_ resource: FSResource, arguments: [String] = []) throws -> FSVolume {
         lock.lock(); defer { lock.unlock() }
         guard loaded == nil else { throw posix(EBUSY) }
         guard !arguments.contains("-f") else { throw posix(ENOTSUP) }
         try acquire(resource)
-        let volume = HelloVolume()
+        let volume: FSVolume
+        if let metadataSourceFactory {
+            let source = try metadataSourceFactory()
+            let adapter = MTPMetadataAdapter(source: source)
+            volume = MTPMetadataVolume(adapter: adapter, volumeUUID: source.snapshot.generation)
+        } else {
+            volume = HelloVolume()
+        }
         loaded = resource
         containerStatus = .ready
         return volume
