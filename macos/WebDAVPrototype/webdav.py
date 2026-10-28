@@ -14,6 +14,7 @@ import re
 import threading
 import uuid
 from collections import deque
+from contextlib import nullcontext
 from email.utils import formatdate
 from http import HTTPStatus
 
@@ -54,6 +55,7 @@ class Node:
     size: int | None = None
     content_key: str | None = None  # Only a verified content provider can resolve this.
     modified: str | None = None
+    format: int | None = None  # Known MTP format, not a guessed MIME type or content capability.
 
 @dataclass(frozen=True)
 class Listing:
@@ -332,6 +334,7 @@ class Response:
     offset: int = 0
     count: int = 0
     head: bool = False
+    validate: object = None  # Metadata-only reply lease; no content provider involved.
 
 class Handler:
     def __init__(self, metadata: MetadataProvider, content: ContentProvider):
@@ -345,14 +348,19 @@ class Handler:
             node = matches[0]
         if not self.metadata.current(node): raise Failure(409, 'stale identity')
         return node
-    def handle(self, request):
-        try: return self._handle(request)
+    def handle(self, request, cancel=None):
+        try:
+            scope = getattr(self.metadata, 'request_scope', None)
+            with scope(cancel) if scope else nullcontext(): return self._handle(request)
         except Failure as error:
             return Response(error.status, error.headers, error.body, head=request.method == 'HEAD')
     def _handle(self, request):
         if request.method in MUTATING: raise Failure(403, 'read-only policy')
+        metadata_only = getattr(self.metadata, 'supports_content', True) is False
+        if metadata_only and request.method in ('GET', 'HEAD'):
+            raise Failure(503, 'MTP content disabled', {'Allow': 'OPTIONS, PROPFIND'})
         if request.method == 'OPTIONS' and request.target == '*':
-            return Response(200, {'Allow': ALLOW, 'DAV': '1'})
+            return Response(200, {'Allow': 'OPTIONS, PROPFIND' if metadata_only else ALLOW, 'DAV': '1'})
         parts = path_parts(request.target)
         node = self.resolve(parts)
         if request.target.endswith('/') and parts and not node.directory: raise Failure(404, 'not collection')
@@ -394,7 +402,11 @@ class Handler:
             body = ET.tostring(root, encoding='utf-8', xml_declaration=True)
             if len(body) > MAX_XML: raise Failure(507, 'XML cap')
             if not all(self.metadata.current(item) for _, item, _ in entries): raise Failure(409, 'stale identity')
-            return Response(207, {'Content-Type': 'application/xml; charset=utf-8'}, body)
+            validate = None
+            if metadata_only:
+                nodes = tuple(item for _, item, _ in entries)
+                validate = lambda: self.metadata.validate_response(nodes)
+            return Response(207, {'Content-Type': 'application/xml; charset=utf-8'}, body, validate=validate)
         if node.directory: raise Failure(405, 'collection content unsupported', {'Allow': 'OPTIONS, PROPFIND'})
         if node.size is None or node.content_key is None: raise Failure(503, 'metadata only')
         if not 0 <= node.size <= MAX_RESPONSE: raise Failure(503, 'content cap')
@@ -449,6 +461,7 @@ def send(handler, response, sink, cancel=None, close=False):
         return data
     try:
         cancel.check()
+        if response.validate: response.validate()
         first = b''
         if response.node:
             if not handler.metadata.current(response.node): raise Failure(409, 'stale identity')
@@ -472,11 +485,13 @@ def send(handler, response, sink, cancel=None, close=False):
                     if result.sent < response.count:
                         data = read(response.offset + result.sent, min(CHUNK, response.count-result.sent))
             else:
+                if response.validate: response.validate()
                 write_all(sink, response.body, cancel); result.sent = len(response.body)
         cancel.check()
         sink.flush()
         cancel.check()
         if response.node and not handler.metadata.current(response.node): raise Failure(409, 'stale identity')
+        if response.validate: response.validate()
         result.complete = True
     except Exception as error:
         result.failure = error.reason if isinstance(error, Failure) else type(error).__name__
@@ -518,7 +533,7 @@ def serve_connection(handler, source, sink, cancel=None, max_requests=32, log=la
         if request is None:
             return 'peer_closed_without_request' if index == 0 else 'peer_closed'
         close = request.close or index == max_requests-1 or close_after_response
-        result = send(handler, handler.handle(request), sink, cancel, close)
+        result = send(handler, handler.handle(request, cancel), sink, cancel, close)
         log({'event':'request', 'request':index, 'request_line_parsed':True,
              'first_bytes_received':getattr(source, 'first_bytes_received', True),
              'method':request.method, 'target':_log_target(request.target),
