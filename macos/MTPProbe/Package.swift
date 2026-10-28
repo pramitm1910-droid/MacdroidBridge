@@ -6,7 +6,12 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    products: [
+        .library(name: "MTPProbeLib", targets: ["MTPProbeLib"]),
+        .library(name: "MTPMetadataContracts", targets: ["MTPMetadataContracts"])
+    ],
     targets: [
+        .target(name: "MTPMetadataContracts", path: "Sources/MTPMetadataContracts"),
         // The runnable CLI tool
         .executableTarget(
             name: "MTPProbe",
@@ -22,11 +27,12 @@ let package = Package(
         // Imported by MTPProbe and independently unit-testable.
         .target(
             name: "MTPProbeLib",
+            dependencies: ["MTPMetadataContracts"],
             path: "Sources/MTPProbeLib"
         ),
         .testTarget(
             name: "MTPProbeTests",
-            dependencies: ["MTPProbeLib"],
+            dependencies: ["MTPProbeLib", "MTPMetadataContracts"],
             path: "Tests/MTPProbeTests"
         ),
     ]
