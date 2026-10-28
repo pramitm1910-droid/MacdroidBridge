@@ -239,9 +239,6 @@ func runDiscoveryProbe(diagnosticOnly: Bool = false, diagnosticStorageID: UInt32
         diagnostic.reportEvents(deviceInfo.eventsSupported)
         print("Manufacturer: \(deviceInfo.manufacturer)")
         print("Model: \(deviceInfo.model)")
-        if !diagnosticOnly {
-            print("Serial Number: \(deviceInfo.serialNumber)")
-        }
         print("Device Version: \(deviceInfo.deviceVersion)")
 
         print("\nEnumerating storage volumes...")
