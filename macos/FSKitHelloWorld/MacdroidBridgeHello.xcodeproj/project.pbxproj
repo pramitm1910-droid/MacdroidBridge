@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		000000000000000000000024 /* Sources/HelloFS/MTPMetadataAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000025 /* Sources/HelloFS/MTPMetadataAdapter.swift */; };
+		000000000000000000000026 /* Sources/HelloFS/MTPMetadataVolume.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000027 /* Sources/HelloFS/MTPMetadataVolume.swift */; };
+		000000000000000000000028 /* MTPMetadataContracts in Frameworks */ = {isa = PBXBuildFile; productRef = 000000000000000000000029 /* MTPMetadataContracts */; };
 		000000000000000000000014 /* Extension/HelloExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000001 /* Extension/HelloExtension.swift */; };
 		000000000000000000000015 /* Sources/HelloFS/HelloFileSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000003 /* Sources/HelloFS/HelloFileSystem.swift */; };
 		000000000000000000000016 /* Sources/HelloFS/HelloVolume.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000000000000000000000004 /* Sources/HelloFS/HelloVolume.swift */; };
@@ -40,6 +43,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		000000000000000000000025 /* Sources/HelloFS/MTPMetadataAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/HelloFS/MTPMetadataAdapter.swift; sourceTree = "<group>"; };
+		000000000000000000000027 /* Sources/HelloFS/MTPMetadataVolume.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/HelloFS/MTPMetadataVolume.swift; sourceTree = "<group>"; };
 		000000000000000000000001 /* Extension/HelloExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Extension/HelloExtension.swift; sourceTree = "<group>"; };
 		000000000000000000000002 /* Host/HelloHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Host/HelloHost.swift; sourceTree = "<group>"; };
 		000000000000000000000003 /* Sources/HelloFS/HelloFileSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/HelloFS/HelloFileSystem.swift; sourceTree = "<group>"; };
@@ -71,6 +76,8 @@
 				000000000000000000000003 /* Sources/HelloFS/HelloFileSystem.swift */,
 				000000000000000000000004 /* Sources/HelloFS/HelloVolume.swift */,
 				000000000000000000000005 /* Sources/HelloFS/MemoryTree.swift */,
+				000000000000000000000025 /* Sources/HelloFS/MTPMetadataAdapter.swift */,
+				000000000000000000000027 /* Sources/HelloFS/MTPMetadataVolume.swift */,
 				000000000000000000000006 /* Config/Extension-Info.plist */,
 				000000000000000000000007 /* Config/Host-Info.plist */,
 				000000000000000000000008 /* Config/Extension.entitlements */,
@@ -87,6 +94,7 @@
 			buildConfigurationList = 000000000000000000000013 /* Build configuration list for PBXNativeTarget "MacdroidBridgeFS" */;
 			buildPhases = (
 				000000000000000000000018 /* Sources */,
+				00000000000000000000002A /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -95,6 +103,9 @@
 			name = MacdroidBridgeFS;
 			productName = MacdroidBridgeFS;
 			productReference = 00000000000000000000000A /* MacdroidBridgeFS.appex */;
+			packageProductDependencies = (
+				000000000000000000000029 /* MTPMetadataContracts */,
+			);
 			productType = "com.apple.product-type.extensionkit-extension";
 		};
 		000000000000000000000022 /* MacdroidBridgeHello */ = {
@@ -116,6 +127,15 @@
 		};
 /* End PBXNativeTarget section */
 
+/* Begin PBXFrameworksBuildPhase section */
+		00000000000000000000002A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (000000000000000000000028 /* MTPMetadataContracts in Frameworks */,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
 /* Begin PBXProject section */
 		000000000000000000000023 /* Project object */ = {
 			isa = PBXProject;
@@ -132,6 +152,9 @@
 			);
 			mainGroup = 00000000000000000000000D;
 			productRefGroup = 00000000000000000000000C /* Products */;
+			packageReferences = (
+				00000000000000000000002B /* XCLocalSwiftPackageReference "../MTPProbe" */,
+			);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -150,6 +173,8 @@
 				000000000000000000000015 /* Sources/HelloFS/HelloFileSystem.swift in Sources */,
 				000000000000000000000016 /* Sources/HelloFS/HelloVolume.swift in Sources */,
 				000000000000000000000017 /* Sources/HelloFS/MemoryTree.swift in Sources */,
+				000000000000000000000024 /* Sources/HelloFS/MTPMetadataAdapter.swift in Sources */,
+				000000000000000000000026 /* Sources/HelloFS/MTPMetadataVolume.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -287,6 +312,14 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		00000000000000000000002B /* XCLocalSwiftPackageReference "../MTPProbe" */ = {isa = XCLocalSwiftPackageReference; relativePath = ../MTPProbe; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		000000000000000000000029 /* MTPMetadataContracts */ = {isa = XCSwiftPackageProductDependency; package = 00000000000000000000002B /* XCLocalSwiftPackageReference "../MTPProbe" */; productName = MTPMetadataContracts; };
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 000000000000000000000023 /* Project object */;
 }

@@ -1,6 +1,7 @@
 import XCTest
 import FSKit
 import Darwin
+import MTPMetadataContracts
 @testable import HelloFS
 
 final class PathResourceTests: XCTestCase {
@@ -48,8 +49,10 @@ final class PathResourceTests: XCTestCase {
         let scopedFS = HelloFileSystem(access: scope.access)
         let volume = try scopedFS.load(path)
         let genericVolume = try fs.load(generic)
-        XCTAssertEqual(try volume.tree.read(5, offset: 0, length: 100), try genericVolume.tree.read(5, offset: 0, length: 100))
-        XCTAssertEqual(try volume.tree.entries(in: 2, cookie: 0, includeDots: false).map(\.name), ["Documents", "README.txt"])
+        let pathTree = try XCTUnwrap(volume as? HelloVolume).tree
+        let genericTree = try XCTUnwrap(genericVolume as? HelloVolume).tree
+        XCTAssertEqual(try pathTree.read(5, offset: 0, length: 100), try genericTree.read(5, offset: 0, length: 100))
+        XCTAssertEqual(try pathTree.entries(in: 2, cookie: 0, includeDots: false).map(\.name), ["Documents", "README.txt"])
         XCTAssertEqual(scope.starts, 1); XCTAssertEqual(scope.stops, 0)
         checkError(EBUSY) { _ = try scopedFS.load(path) }
         checkError(EINVAL) { try scopedFS.unload(generic) }
@@ -62,6 +65,53 @@ final class PathResourceTests: XCTestCase {
         _ = try scopedFS.load(generic)
         try scopedFS.unload(generic)
         XCTAssertEqual(scope.starts, 1)
+    }
+
+    func testInjectedMetadataSourceRoutesLoadAndCallbacks() throws {
+        final class Source: MTPMetadataSource {
+            let generation = UUID()
+            var value: MTPMetadataSnapshot
+            init() {
+                value = .init(generation: UUID(), state: .available, storageState: .available,
+                              storages: [.init(generation: UUID(), id: 7, name: "Phone")])
+                let generation = value.generation
+                value = .init(generation: generation, state: .available, storageState: .available,
+                              storages: [.init(generation: generation, id: 7, name: "Phone")])
+            }
+            var snapshot: MTPMetadataSnapshot { value }
+            func enter(storage: UInt32, path: [MTPMetadataObjectIdentity]) throws -> MTPMetadataSnapshot {
+                value = .init(generation: value.generation, state: .complete, storageState: .available,
+                              storages: value.storages, directoryStorage: storage, directoryHandle: 0,
+                              entries: [.init(generation: value.generation, storage: storage, handle: 44,
+                                              parent: 0, name: "Résumé.txt", isDirectory: false, size: 6, format: 0)])
+                return value
+            }
+            func continueListing() throws -> MTPMetadataSnapshot { value }
+            func refresh() throws -> MTPMetadataSnapshot { value }
+            func cancel() { value = .init(generation: value.generation, namespace: UUID(), state: .disconnected,
+                                          storageState: .disconnected, storages: []) }
+        }
+        let source = Source()
+        let service = MTPMetadataService(source: source)
+        let client = try MTPMetadataClient(transport: MTPInProcessMetadataTransport(service: service))
+        let fs = HelloFileSystem(metadataSourceFactory: { client })
+        let volume = try XCTUnwrap(fs.load(generic) as? MTPMetadataVolume)
+        XCTAssertEqual((volume.activationError as NSError).code, Int(EOPNOTSUPP))
+        var storageItem: FSItem?
+        volume.lookupItem(named: FSFileName(string: "Phone"), inDirectory: volume.rootItem) { item, _, error in
+            XCTAssertNil(error); storageItem = item
+        }
+        let storage = try XCTUnwrap(storageItem)
+        var child: FSItem?
+        volume.lookupItem(named: FSFileName(string: "Résumé.txt"), inDirectory: storage) { item, _, error in
+            XCTAssertNil(error); child = item
+        }
+        var attributes: FSItem.Attributes?
+        volume.getAttributes(FSItem.GetAttributesRequest(), of: try XCTUnwrap(child)) { attrs, error in
+            XCTAssertNil(error); attributes = attrs
+        }
+        XCTAssertEqual(attributes?.size, 6)
+        XCTAssertEqual(attributes?.mode, 0o444)
     }
     func testLoadFailuresAndDeinitCleanup() throws {
         let scope = Scope()

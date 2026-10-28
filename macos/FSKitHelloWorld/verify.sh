@@ -12,11 +12,26 @@ test -d "$SDK26/System/Library/Frameworks/FSKit.framework"
 # Build the native app/ExtensionKit targets using Xcode's registered SDK.
 xcodebuild -project MacdroidBridgeHello.xcodeproj -scheme MacdroidBridgeHello \
   -configuration Debug -sdk macosx -derivedDataPath "$BUILD_ROOT/xcode" \
-  CODE_SIGNING_ALLOWED=NO REGISTER_APP=NO build > "$BUILD_ROOT/xcode.log" 2>&1
+  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO REGISTER_APP=NO build > "$BUILD_ROOT/xcode.log" 2>&1
 
-# Independently compile AND link both complete executables using only SDK 26.5.
+# Independently build the backend-side bridge against SDK 26.5. FSKit consumes only
+# the metadata contracts module, keeping MTP/USB code out of the extension process.
+swift build --package-path ../MTPProbe --scratch-path "$BUILD_ROOT/mtp-probe-sdk26" \
+  --target MTPProbeLib -Xswiftc -sdk -Xswiftc "$SDK26" > "$BUILD_ROOT/mtp-probe.log" 2>&1
+swift build --package-path ../MTPProbe --scratch-path "$BUILD_ROOT/mtp-probe-sdk26" \
+  --target MTPProbe -Xswiftc -sdk -Xswiftc "$SDK26" > "$BUILD_ROOT/mtp-probe-cli.log" 2>&1
+swift test --package-path ../MTPProbe --scratch-path "$BUILD_ROOT/mtp-probe-tests" \
+  --filter MTPFolderBrowserTests -Xswiftc -sdk -Xswiftc "$SDK26" > "$BUILD_ROOT/mtp-probe-tests.log" 2>&1
+# Compile and link both complete FSKit executables using only SDK 26.5.
+mkdir -p "$BUILD_ROOT/module26"
 xcrun swiftc -sdk "$SDK26" -target "$TARGET_ARCH-apple-macos26.0" \
-  -module-cache-path "$BUILD_ROOT/modules" -application-extension -parse-as-library \
+  -module-cache-path "$BUILD_ROOT/modules" -emit-module -emit-library \
+  -module-name MTPMetadataContracts -emit-module-path "$BUILD_ROOT/module26/MTPMetadataContracts.swiftmodule" \
+  ../MTPProbe/Sources/MTPMetadataContracts/*.swift -o "$BUILD_ROOT/module26/libMTPMetadataContracts.dylib"
+xcrun swiftc -sdk "$SDK26" -target "$TARGET_ARCH-apple-macos26.0" \
+  -module-cache-path "$BUILD_ROOT/modules" -I "$BUILD_ROOT/module26" -L "$BUILD_ROOT/module26" \
+  -lMTPMetadataContracts -application-extension -parse-as-library \
+  -Xlinker -rpath -Xlinker "$BUILD_ROOT/module26" \
   Sources/HelloFS/*.swift Extension/HelloExtension.swift -o "$BUILD_ROOT/extension-sdk26"
 xcrun swiftc -sdk "$SDK26" -target "$TARGET_ARCH-apple-macos26.0" \
   -module-cache-path "$BUILD_ROOT/modules" -parse-as-library \
